@@ -5,10 +5,11 @@ description: Open interactive cluster allocations (CPU or GPU shells) that relea
 
 # Safe interactive allocations
 
-> **UNTESTED on a real cluster: validate on a CPU queue first.** `scripts/hpc-session` has passed local
-> smoke tests with a fake `bkill` (idle, busy, fresh heartbeat, CPU fallback via `bjobs`), but not on a
-> real LSF or SLURM job. Before relying on it: run it on a CPU queue with `HPC_DRY_RUN=1 HPC_IDLE_MIN=5`,
-> check `~/.hpc-session/<jobid>.log` shows the right CPU source and decisions, then repeat on a GPU queue.
+> **Tested on LSF, not yet on SLURM.** On an LSF cluster (October 2026) `scripts/hpc-session` read the job's
+> cgroup CPU counter, kept the job alive while it used CPU and while the user typed, and released it about
+> two minutes after the idle limit, on a CPU queue and on a GPU queue (idle GPU). Not yet tested: a busy GPU
+> with idle CPU, and `hpc-session-slurm`. On a new site, first run once with `HPC_DRY_RUN=1 HPC_IDLE_MIN=5`
+> and check `~/.hpc-session/<jobid>.log` shows a `cpu_source=v1:` or `v2:` path.
 
 Problem: an agent opens an interactive allocation in tmux, then stops (usage limit, crash, laptop sleep,
 expired login). The allocation, often a GPU, idles until its walltime. Scheduler idle detection rarely
@@ -26,8 +27,8 @@ Goal: no interactive allocation outlives its usefulness by more than about 30 mi
 ## The three layers
 
 1. **Short walltime.** `-W 2:00` (SLURM `--time=02:00:00`). This is the hard backstop if everything else
-   fails. On LSF, extend with `bmod -W <new> <jobid>` when a session legitimately runs longer, if the site
-   allows it (`LSB_MOD_ALL_JOBS=Y`). Test that once. SLURM users usually cannot extend.
+   fails. Many sites do not let users extend a running job (`bmod -W` or `scontrol update`), so choose the
+   walltime up front and start a new session if you need more. Test once with a `sleep` job if unsure.
 2. **The wrapper.** Start `hpc-session` instead of a bare `bash`:
 
    ```bash

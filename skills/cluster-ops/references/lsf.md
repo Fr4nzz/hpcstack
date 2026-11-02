@@ -13,8 +13,9 @@ lshosts                                # cores and memory per host type
 grep -E 'LSF_UNIT_FOR_LIMITS|LSB_MOD_ALL_JOBS' "$LSF_ENVDIR/lsf.conf"   # MB/GB units, bmod on running jobs
 ```
 
-`LSF_UNIT_FOR_LIMITS=MB` means `-M 4000` is 4 GB. If `LSB_MOD_ALL_JOBS=Y`, you can extend the walltime of a
-running job with `bmod -W` up to the queue RUNLIMIT. Test that once on a throwaway job before relying on it.
+`LSF_UNIT_FOR_LIMITS=MB` means `-M 4000` is 4 GB. `LSB_MOD_ALL_JOBS=Y` alone does not mean users can extend a
+running job: on at least one site with it set, `bmod -W` on a running job answers "Cannot change job options
+for a running job". Test once on a throwaway `sleep` job. If it fails, choose `-W` up front and resubmit.
 
 ## Submit
 
@@ -52,7 +53,7 @@ Finished jobs drop out of `bjobs -a` after the site's clean period. The `.out` f
 ## Modify and kill
 
 ```bash
-bmod -W 6:00 <id>        # walltime of a running job, if the site allows it
+bmod -W 6:00 <id>        # walltime of a pending job (running jobs: often refused, test first)
 bstop / bresume <id>
 bkill <id>               # exact id only. bkill -s USR2 <id> sends a signal instead
 ```

@@ -1,0 +1,17 @@
+name: check
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint
+        run: scripts/lint.sh
+      - name: Scrub (generic patterns, plus personal ones if the SCRUB_PATTERNS secret is set)
+        env:
+          SCRUB_PATTERNS: ${{ secrets.SCRUB_PATTERNS }}
+        run: |
+          if [ -n "$SCRUB_PATTERNS" ]; then printf '%s\n' "$SCRUB_PATTERNS" > .scrub-patterns.local; fi
+          scripts/scrub_check.sh

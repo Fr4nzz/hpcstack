@@ -12,16 +12,17 @@ Options: --tsv for tab-separated output.
 
 Suggestion rules: cores = cores actually used, rounded up from x.25 and capped at the allocation, memory = 1.3 x peak rounded up to 500 MB,
 walltime = 1.5 x run time (use the p95 over many runs when you have them).
-Flags: LOW_CPU (eff < 0.5), MEM_OVER (peak/req < 0.4), MEM_NEAR (> 0.95), IDLE (idle factor < 0.25), FAILED.
+Flags: RUNNING (values so far, so -M and -W are floors), LOW_CPU (eff < 0.5), MEM_OVER (peak/req < 0.4), MEM_NEAR (> 0.95), IDLE (idle factor < 0.25), FAILED.
 A job killed at its memory limit shows MEM_NEAR: its true peak is unknown, so the -M suggestion is a floor.
 """
 import json
 import math
 import re
+import signal
 import subprocess
 import sys
 
-BJOBS_FIELDS = "jobid stat queue slots cpu_used run_time max_mem memlimit idle_factor exit_code"
+BJOBS_FIELDS = "jobid jobindex stat queue slots cpu_used run_time max_mem memlimit idle_factor exit_code"
 UNIT_MB = {"": 1.0, "k": 1 / 1024, "m": 1.0, "g": 1024.0, "t": 1024.0 ** 2}
 
 
@@ -69,8 +70,9 @@ def from_bjobs_json(text):
         if "ERROR" in r:
             out.append({"id": r.get("JOBID", "?"), "error": r["ERROR"]})
             continue
+        idx = str(r.get("JOBINDEX") or "0")
         out.append({
-            "id": r.get("JOBID"), "state": r.get("STAT"),
+            "id": r.get("JOBID") + (f"[{idx}]" if idx not in ("0", "-") else ""), "state": r.get("STAT"),
             "cores": int(r.get("SLOTS") or 1),
             "cpu_s": seconds(r.get("CPU_USED")), "wall_s": seconds(r.get("RUN_TIME")),
             "peak_mb": mem_mb(r.get("MAX_MEM")), "req_mb": mem_mb(r.get("MEMLIMIT")),
@@ -172,6 +174,9 @@ def analyse(j):
         flags.append("MEM_NEAR")
     if peak:
         sug["M"] = int(math.ceil(peak * 1.3 / 500.0) * 500)
+    running = (j.get("state") or "").upper() in ("RUN", "RUNNING", "PEND", "PENDING")
+    if running:
+        flags.append("RUNNING")  # peak and run time so far: -M and -W are floors, not final values
     if wall:
         mins = math.ceil(wall * 1.5 / 60.0)
         sug["W"] = f"{mins // 60}:{mins % 60:02d}"
@@ -227,4 +232,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # quiet exit when piped into head
     sys.exit(main(sys.argv[1:]))

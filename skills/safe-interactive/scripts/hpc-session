@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # hpc-session: an interactive shell for a batch allocation that releases the job when nobody uses it.
 #
-# UNTESTED on a real cluster: validate on a CPU queue first, then on a GPU queue, before relying on it.
+# Tested on LSF (October 2026): survives while the job uses CPU or the user types, releases the job after the
+# idle limit on a CPU queue and on a GPU queue. Not yet tested: a busy GPU with idle CPU, and SLURM.
 #
 # Run it as the command of an interactive allocation, inside tmux on the login node:
 #   LSF:   bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00 -wa USR2 -wt 10 \
@@ -146,8 +147,9 @@ watchdog() {
     age=$(( now - $(stat -c %Y "$HB" 2>/dev/null || echo "$now") ))
     gpu=$(gpu_max_util)
     if (( age > IDLE_S )) && [[ $busy == no ]] && { [[ -z $gpu ]] || (( gpu < GPU_IDLE_PCT )); }; then
-      log "idle: heartbeat ${age}s old, cpu ${cores:-?} cores over ${CPU_WINDOW_S}s, gpu ${gpu:+$gpu%}${gpu:-none}. Releasing job $JOB"
+      log "idle: heartbeat ${age}s old, cpu ${cores:-?} cores over ${CPU_WINDOW_S}s, gpu ${gpu:-none}${gpu:+%}. Releasing job $JOB"
       if [[ $DRY_RUN == 1 ]]; then log "dry run: not killing"; continue; fi
+      rm -f "$DIR/$JOB.rc" "$HB"   # the shell is killed with the job and cannot clean up
       kill_job >> "$LOG" 2>&1
       exit 0
     fi

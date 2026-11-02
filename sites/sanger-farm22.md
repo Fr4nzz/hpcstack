@@ -17,8 +17,9 @@ Internal documentation is not reproduced here. Verify every limit on the cluster
   with `-R "select[mem>=X] rusage[mem=X]"`, the form the nf-core GPU settings use.
 - Units: check `grep LSF_UNIT_FOR_LIMITS $LSF_ENVDIR/lsf.conf`. With `MB`, `-M 4000` is 4 GB.
 - Default memory limits on queues can be very small. Check `bqueues -l <queue>` and always pass `-M`.
-- Whether `bmod -W` works on running jobs: `grep LSB_MOD_ALL_JOBS $LSF_ENVDIR/lsf.conf`. Test it once on a
-  throwaway job before `safe-interactive` relies on it.
+- Users cannot extend a running job: `bmod -W` answers "Cannot change job options for a running job" for
+  both interactive and batch jobs, although `LSB_MOD_ALL_JOBS=Y` is set (tested October 2026). Pick `-W`
+  up front and resubmit if it runs out.
 - Idle-job exceptions: `bqueues -l <queue> | grep -A2 -i idle`. They notify only and are not defined on every
   queue, so they are no substitute for `safe-interactive`.
 

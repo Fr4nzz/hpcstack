@@ -10,7 +10,8 @@ scripts/lint.sh          # frontmatter, line budgets, bash -n, shellcheck, py_co
 scripts/scrub_check.sh   # privacy patterns (see "Scrub rules" below)
 ```
 
-Both must pass.
+Both must pass. To run them on every commit, enable the hook once per clone:
+`git config core.hooksPath .githooks`. CI runs the same checks on every push and pull request.
 
 ## Adding a site profile
 

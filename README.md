@@ -93,11 +93,12 @@ with new site profiles are welcome (see `CONTRIBUTING.md`).
 
 Version 0.1. The skills come from real use, but the helper scripts are new:
 
-- `safe-interactive/scripts/hpc-session` is **untested on a real cluster**. It passed local smoke tests
-  with a fake `bkill`. Validate it on a CPU queue with `HPC_DRY_RUN=1` before relying on it.
-- `jobeff`, `quota_report.sh`, `listing_job.sh`, `analyse_listing.py`, `queue_worker.py`, `results_tsv.py`
-  and `plot_progress.py` were tested on synthetic inputs (saved scheduler output, fake `lfs`, local
-  directories), not yet against live LSF or SLURM.
+- `safe-interactive/scripts/hpc-session` was tested on real LSF jobs (CPU and GPU queues): it stays out of
+  the way while the job works or the user types, and releases the job once both stop. Not yet tested on
+  SLURM, or with a busy GPU and idle CPU.
+- `jobeff` and `quota_report.sh` were run against live LSF and Lustre. `listing_job.sh`,
+  `analyse_listing.py`, `queue_worker.py`, `results_tsv.py` and `plot_progress.py` were tested on synthetic
+  inputs (fake `lfs`, local directories), not yet on a cluster. SLURM paths are untested.
 
 Reports of what breaks on your cluster are the most useful issues you can open.
 
