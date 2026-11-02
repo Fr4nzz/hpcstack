@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# hpc-session-slurm: SLURM entry point for hpc-session (same watchdog, releases the job with scancel).
+#
+# UNTESTED on a real cluster: validate on a CPU partition first, then on a GPU partition.
+#
+#   srun --cpus-per-task=2 --mem=4G --time=02:00:00 --pty /path/to/hpc-session-slurm
+#
+# SLURM users usually cannot extend --time on a running job, so pick a modest --time. The cgroup lookup
+# matches "job_<SLURM_JOB_ID>". CPU fallback is `sstat -j <id> --format=TotalCPU`.
+# All HPC_* settings of hpc-session apply.
+export HPC_SCHED=slurm
+exec "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/hpc-session" "$@"

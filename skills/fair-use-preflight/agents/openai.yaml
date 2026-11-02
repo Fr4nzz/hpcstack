@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fair-Use Preflight"
+  short_description: "60-second checklist and receipt before submitting"
+  default_prompt: "Use $fair-use-preflight to check this submission before it goes to the scheduler."

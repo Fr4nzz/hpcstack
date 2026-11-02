@@ -1,0 +1,16 @@
+{
+  "name": "hpcstack",
+  "owner": {
+    "name": "hpcstack contributors"
+  },
+  "description": "Agent skills for shared HPC clusters (LSF and SLURM): faster, cheaper, and fairer to everyone else in the queue.",
+  "plugins": [
+    {
+      "name": "hpcstack",
+      "source": "./",
+      "description": "Submit, right-size, optimise and clean up jobs on shared batch clusters, with budgets and verification built in.",
+      "category": "hpc",
+      "keywords": ["hpc", "lsf", "slurm", "cluster", "bioinformatics", "nextflow", "skills"]
+    }
+  ]
+}

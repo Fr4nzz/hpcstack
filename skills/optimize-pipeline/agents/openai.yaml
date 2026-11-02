@@ -1,0 +1,4 @@
+interface:
+  display_name: "Optimize Pipeline"
+  short_description: "Measured speed-up without changing results"
+  default_prompt: "Use $optimize-pipeline to make this step faster and lighter without changing its output."

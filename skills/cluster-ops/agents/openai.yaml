@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cluster Ops"
+  short_description: "Submit, monitor and recover jobs on a shared cluster"
+  default_prompt: "Use $cluster-ops to run this on the cluster as a batch job and tell me when the outputs are verified."

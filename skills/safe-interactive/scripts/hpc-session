@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# hpc-session: an interactive shell for a batch allocation that releases the job when nobody uses it.
+#
+# UNTESTED on a real cluster: validate on a CPU queue first, then on a GPU queue, before relying on it.
+#
+# Run it as the command of an interactive allocation, inside tmux on the login node:
+#   LSF:   bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00 -wa USR2 -wt 10 \
+#               /path/to/hpc-session
+#   SLURM: srun --cpus-per-task=2 --mem=4G --time=02:00:00 --pty /path/to/hpc-session-slurm
+#
+# What it does:
+#   - writes $HPC_SESSION_DIR/<jobid>.json (job, host, start, idle limit) and logs to <jobid>.log
+#   - starts a watchdog in its own session, then an interactive bash whose PROMPT_COMMAND touches a
+#     heartbeat file. Every command typed (or sent with tmux send-keys) refreshes the heartbeat.
+#   - every HPC_CHECK_S seconds the watchdog releases the job (bkill / scancel) only when ALL hold:
+#       heartbeat older than HPC_IDLE_MIN minutes
+#       job CPU over the last HPC_CPU_WINDOW_S seconds below HPC_CPU_IDLE_CORES cores
+#       every visible GPU below HPC_GPU_IDLE_PCT % utilisation (no nvidia-smi = no GPU check)
+#   - if job CPU cannot be measured (no cgroup counter and no bjobs/sstat), it never kills on CPU grounds
+#     and logs a warning. The short walltime (-W / --time) is then the only backstop.
+#
+# Settings (environment variables):
+#   HPC_IDLE_MIN=30  HPC_CHECK_S=60  HPC_CPU_WINDOW_S=300  HPC_CPU_IDLE_CORES=0.1  HPC_GPU_IDLE_PCT=5
+#   HPC_IDLE_S (seconds, overrides HPC_IDLE_MIN)  HPC_SESSION_DIR=$HOME/.hpc-session
+#   HPC_DRY_RUN=1 (log the decision, never kill)  HPC_CPU_SOURCE=auto|sched (sched: skip the cgroup lookup)
+#   HPC_SCHED=lsf|slurm (default: detected from LSB_JOBID / SLURM_JOB_ID)
+set -u
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+if [[ ${1:-} == -h || ${1:-} == --help ]]; then sed -n '2,/^set -u/p' "$SELF" | sed '$d'; exit 0; fi
+IDLE_MIN=${HPC_IDLE_MIN:-30}
+CHECK_S=${HPC_CHECK_S:-60}
+CPU_WINDOW_S=${HPC_CPU_WINDOW_S:-300}
+CPU_IDLE_CORES=${HPC_CPU_IDLE_CORES:-0.1}
+GPU_IDLE_PCT=${HPC_GPU_IDLE_PCT:-5}
+DIR=${HPC_SESSION_DIR:-$HOME/.hpc-session}
+DRY_RUN=${HPC_DRY_RUN:-0}
+IDLE_S=${HPC_IDLE_S:-$(( IDLE_MIN * 60 ))}   # seconds; overrides HPC_IDLE_MIN (useful for tests)
+
+if [[ -z ${HPC_SCHED:-} ]]; then
+  if [[ -n ${LSB_JOBID:-} ]]; then HPC_SCHED=lsf; elif [[ -n ${SLURM_JOB_ID:-} ]]; then HPC_SCHED=slurm; fi
+fi
+case ${HPC_SCHED:-} in
+  lsf)   JOB=${LSB_JOBID:?LSB_JOBID not set}; JOB_PATTERN="job.${JOB}." ;;
+  slurm) JOB=${SLURM_JOB_ID:?SLURM_JOB_ID not set}; JOB_PATTERN="job_${JOB}" ;;
+  *) echo "hpc-session: run me as the command of an interactive job (bsub -Is or srun --pty)" >&2; exit 2 ;;
+esac
+
+LOG=$DIR/$JOB.log
+HB=$DIR/$JOB.hb
+log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
+
+# ---- CPU measurement ---------------------------------------------------------------------------
+# Prints cumulative CPU seconds of the whole job (float), or nothing if unknown.
+find_cgroup_counter() {
+  local line path dir
+  # cgroup v2: "0::/path"
+  line=$(grep -m1 '^0::' /proc/self/cgroup 2>/dev/null)
+  if [[ -n $line && -f /sys/fs/cgroup/cgroup.controllers ]]; then
+    path=${line#0::}
+    dir=/sys/fs/cgroup$path
+    while [[ $dir != /sys/fs/cgroup && $dir != / ]]; do
+      if [[ $(basename "$dir") == *"$JOB_PATTERN"* && -r $dir/cpu.stat ]]; then echo "v2:$dir/cpu.stat"; return; fi
+      dir=$(dirname "$dir")
+    done
+    # no job-named ancestor: use our own cgroup if it is not the root
+    [[ $path != / && -r /sys/fs/cgroup$path/cpu.stat ]] && { echo "v2:/sys/fs/cgroup$path/cpu.stat"; return; }
+  fi
+  # cgroup v1: "N:cpu,cpuacct:/path" or "N:cpuacct,cpu:/path" or "N:cpuacct:/path"
+  line=$(grep -m1 -E '^[0-9]+:([^:]*,)?cpuacct(,[^:]*)?:' /proc/self/cgroup 2>/dev/null)
+  if [[ -n $line ]]; then
+    path=${line#*:*:}
+    local root
+    for root in /sys/fs/cgroup/cpu,cpuacct /sys/fs/cgroup/cpuacct,cpu /sys/fs/cgroup/cpuacct; do
+      [[ -d $root ]] || continue
+      dir=$root$path
+      while [[ $dir != "$root" && $dir != / ]]; do
+        if [[ $(basename "$dir") == *"$JOB_PATTERN"* && -r $dir/cpuacct.usage ]]; then echo "v1:$dir/cpuacct.usage"; return; fi
+        dir=$(dirname "$dir")
+      done
+      [[ $path != / && -r $root$path/cpuacct.usage ]] && { echo "v1:$root$path/cpuacct.usage"; return; }
+    done
+  fi
+}
+
+cpu_seconds() {
+  local src=$1 v
+  case $src in
+    v2:*) awk '$1=="usage_usec"{printf "%.3f\n", $2/1e6}' "${src#v2:}" 2>/dev/null ;;
+    v1:*) awk '{printf "%.3f\n", $1/1e9}' "${src#v1:}" 2>/dev/null ;;
+    sched)
+      if [[ $HPC_SCHED == lsf ]]; then
+        v=$(bjobs -noheader -o cpu_used "$JOB" 2>/dev/null | awk '{print $1}')
+      else  # sum TotalCPU over running steps; format [D-][HH:]MM:SS[.ms]
+        v=$(sstat -a -n -P -j "$JOB" --format=TotalCPU 2>/dev/null | awk '
+          NF { t = $0; d = 0
+               if (index(t, "-")) { split(t, a, "-"); d = a[1]; t = a[2] }
+               n = split(t, p, ":"); s = 0
+               for (i = 1; i <= n; i++) s = s * 60 + p[i]
+               tot += d * 86400 + s; seen = 1 }
+          END { if (seen) printf "%.3f\n", tot }')
+      fi
+      [[ $v =~ ^[0-9.]+$ ]] && echo "$v" ;;
+  esac
+}
+
+gpu_max_util() {  # highest utilisation over visible GPUs, or empty if no GPU tool
+  command -v nvidia-smi >/dev/null 2>&1 || return 0
+  nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null |
+    awk '$1 ~ /^[0-9]+$/ { if ($1 > m) m = $1; seen = 1 } END { if (seen) print m + 0 }'
+}
+
+kill_job() {
+  if [[ $HPC_SCHED == lsf ]]; then bkill "$JOB"; else scancel "$JOB"; fi
+}
+
+# ---- watchdog ----------------------------------------------------------------------------------
+watchdog() {
+  local shell_pid=$1 src prev_cpu prev_t now cpu dt busy="unknown" age gpu cores
+  src=""
+  if [[ ${HPC_CPU_SOURCE:-auto} != sched ]]; then
+    src=$(find_cgroup_counter)
+    [[ -n $src ]] && [[ -n $(cpu_seconds "$src") ]] || src=""
+  fi
+  if [[ -z $src ]]; then
+    src=sched
+    [[ -n $(cpu_seconds sched) ]] || src=""
+  fi
+  log "watchdog start: pid $$ shell $shell_pid cpu_source=${src:-none} idle_s=$IDLE_S window=${CPU_WINDOW_S}s"
+  [[ -z $src ]] && log "WARNING: cannot measure job CPU. The watchdog will not kill on idleness. Rely on -W."
+  prev_cpu=$( [[ -n $src ]] && cpu_seconds "$src" ); prev_t=$(date +%s)
+  while sleep "$CHECK_S"; do
+    kill -0 "$shell_pid" 2>/dev/null || { log "shell gone, watchdog exits"; exit 0; }
+    now=$(date +%s)
+    if [[ -n $src ]] && (( now - prev_t >= CPU_WINDOW_S )); then
+      cpu=$(cpu_seconds "$src")
+      if [[ -n $cpu && -n $prev_cpu ]]; then
+        dt=$(( now - prev_t ))
+        cores=$(awk -v a="$cpu" -v b="$prev_cpu" -v t="$dt" 'BEGIN{printf "%.3f", (a-b)/t}')
+        busy=$(awk -v c="$cores" -v lim="$CPU_IDLE_CORES" 'BEGIN{print (c >= lim) ? "yes" : "no"}')
+      else
+        busy="unknown"
+      fi
+      prev_cpu=$cpu; prev_t=$now
+    fi
+    age=$(( now - $(stat -c %Y "$HB" 2>/dev/null || echo "$now") ))
+    gpu=$(gpu_max_util)
+    if (( age > IDLE_S )) && [[ $busy == no ]] && { [[ -z $gpu ]] || (( gpu < GPU_IDLE_PCT )); }; then
+      log "idle: heartbeat ${age}s old, cpu ${cores:-?} cores over ${CPU_WINDOW_S}s, gpu ${gpu:+$gpu%}${gpu:-none}. Releasing job $JOB"
+      if [[ $DRY_RUN == 1 ]]; then log "dry run: not killing"; continue; fi
+      kill_job >> "$LOG" 2>&1
+      exit 0
+    fi
+  done
+}
+
+if [[ ${1:-} == --watchdog ]]; then
+  watchdog "$2"
+  exit 0
+fi
+
+# ---- interactive part --------------------------------------------------------------------------
+mkdir -p "$DIR"
+touch "$HB"
+cat > "$DIR/$JOB.json" <<EOF
+{"job": "$JOB", "scheduler": "$HPC_SCHED", "host": "$(hostname)", "start": "$(date -Is)", "idle_min": $IDLE_MIN, "log": "$LOG"}
+EOF
+cat > "$DIR/$JOB.rc" <<EOF
+[ -f ~/.bashrc ] && source ~/.bashrc
+PROMPT_COMMAND="touch '$HB'\${PROMPT_COMMAND:+; \$PROMPT_COMMAND}"
+echo "hpc-session: job $JOB releases itself after $(( IDLE_S / 60 )) idle minutes (log: $LOG)"
+EOF
+log "session start on $(hostname)"
+
+setsid "$SELF" --watchdog "$$" < /dev/null >> "$LOG" 2>&1 &
+WD=$!
+
+bash --rcfile "$DIR/$JOB.rc" -i
+rc=$?
+log "shell exited with $rc"
+kill "$WD" 2>/dev/null
+pkill -s "$WD" 2>/dev/null
+rm -f "$DIR/$JOB.rc" "$HB"
+exit "$rc"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Right-Size Jobs"
+  short_description: "Set cores, memory and walltime from measured usage"
+  default_prompt: "Use $right-size-jobs to check how efficient my last jobs were and what I should request next time."

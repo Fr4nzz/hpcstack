@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cluster Autoresearch"
+  short_description: "Budgeted keep-or-discard experiment loop"
+  default_prompt: "Use $cluster-autoresearch to run experiments overnight within the budget we agree on."
