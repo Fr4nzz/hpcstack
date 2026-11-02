@@ -53,6 +53,9 @@ bsub -q <gpu-queue> -n 4 -M 16000 -gpu "num=1" -W 8:00 -o q/worker.%J.out \
 - If the agent dies, the worker finishes the queue and exits after 25 idle minutes. No allocation idles until
   its walltime.
 - `touch q/STOP` makes workers finish their current task and exit.
+- The worker exits 0 when it stops normally (idle, max-hours, STOP), even if tasks failed: read
+  `q/results/`. A signal (`bkill`, the `-wa USR2` walltime warning) stops the running task, records it as
+  `interrupted` and exits 128+N, so a `done()` dependent does not run on a half-drained queue.
 - For several workers, submit an array with a cap (`-J 'w[1-4]%4'`). Workers claim tasks with a file lock.
 - Results land in `q/results/<id>.json` (exit code, runtime) and logs in `q/logs/<id>.log`.
 - Each task checkpoints per unit, so a killed or slow worker redoes one task, not the wave. A task whose
