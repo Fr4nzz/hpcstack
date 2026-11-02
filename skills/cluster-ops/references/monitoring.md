@@ -24,7 +24,7 @@ Good: one background watcher that polls every 60 s and exits on a terminal state
 J=1234; UNTIL=END
 t0=$(date +%s)
 while :; do
-  r=$(timeout 60 bjobs -noheader -o stat "$J" 2>&1); rc=$?; s=${r##*$'\n'}
+  rc=0; r=$(timeout 60 bjobs -noheader -o stat "$J" 2>&1) || rc=$?; s=${r##*$'\n'}   # survives set -e
   case $s in
     DONE|EXIT) echo "$s"; break ;;
     RUN) [[ $UNTIL == RUN ]] && { echo RUN; break; } ;;
