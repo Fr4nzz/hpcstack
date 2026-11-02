@@ -29,20 +29,34 @@ while :; do
     DONE|EXIT) echo "$s"; break ;;
     RUN) [[ $UNTIL == RUN ]] && { echo RUN; break; } ;;
     PEND) (( $(date +%s) - t0 > 1800 )) && { echo PEND_30MIN; break; } ;;
-    UNKWN|PSUSP|USUSP|SSUSP) ;;   # UNKWN = lost node contact, not EXIT: keep polling
+    UNKWN|PSUSP|USUSP|SSUSP|PROV|WAIT) ;;   # UNKWN = lost node contact, not EXIT: keep polling
+    ZOMBI) echo ZOMBI; break ;;   # a kill LSF could not confirm: report once, read bacct
     *) if [[ $r == *"is not found"* ]]; then echo GONE; else echo "ERROR rc=$rc: $r"; fi; break ;;
   esac
   sleep 60
 done
-# SLURM
-until s=$(sacct -n -X -P -j 1234 -o State 2>/dev/null | head -1); [[ $s =~ ^(COMPLETED|FAILED|CANCELLED|TIMEOUT|OUT_OF_MEMORY) ]]; do sleep 60; done; echo "$s"
+# SLURM, same shape
+J=1234; UNTIL=END; t0=$(date +%s)
+while :; do
+  rc=0; r=$(timeout 60 sacct -n -X -P -j "$J" -o State 2>&1) || rc=$?; s=${r%%$'\n'*}; s=${s%% *}
+  case $s in
+    COMPLETED|FAILED|CANCELLED|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL) echo "$s"; break ;;
+    RUNNING) [[ $UNTIL == RUN ]] && { echo RUN; break; } ;;
+    PENDING) (( $(date +%s) - t0 > 1800 )) && { echo PEND_30MIN; break; } ;;
+    *) echo "ERROR rc=$rc: $r"; break ;;   # empty reply or error is not a state
+  esac
+  sleep 60
+done
 ```
 
 What the output means:
 
 - `DONE`, `EXIT`, or `GONE` (a confirmed "is not found": finished and purged) are news, not verdicts. Read
   `status.json`, the log and `bacct` (see "When it ends").
-- `PEND_30MIN`: report the pending reason from `bjobs -p -l` (`lsf.md`, "Why pending"). Don't re-arm silently.
+- `PEND_30MIN`: report the pending reason from `bjobs -p -l` (`lsf.md`, "Why pending"). If the request is
+  over-strict, fix it. Otherwise hand off anyway (state file and job file, with the reason in the handoff) or
+  re-run the `UNTIL=RUN` loop and say so. Never leave a pending job with no handoff.
+- `ZOMBI`: report once and read `bacct`. Don't re-run the loop on it.
 - `ERROR` (timeout, authentication or transport failure, or an empty reply) is not a job state. The job stays
   tracked. Check authentication first (an expired certificate does not kill jobs), then run the loop again.
 - A `status.json` or checkpoint that stopped advancing while the job is RUN means a helper died or the job
