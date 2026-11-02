@@ -58,8 +58,10 @@ Settings are environment variables, listed in the script header (`HPC_IDLE_MIN`,
 - An interactive allocation without `hpc-session` and a short walltime is a bug. Fix it before continuing.
 - Record the job id, tmux session name and purpose where the user can see it (status file or the chat).
 - End in this order. (1) `exit` the shell inside the allocation. (2) Confirm with `bjobs`/`squeue` that the
-  allocation is gone. If it is still running after 30 s, check the id is yours, kill that exact id and check
-  the reply. (3) Only then close that one tmux session (`tmux kill-session -t <name>`). Closing tmux does not
+  allocation is gone. If it is still running after 30 s, check the id is yours and kill that exact id
+  (releasing your own idle allocation is an authorised reason). Check the reply, then poll again until the
+  job shows DONE/EXIT (SLURM: COMPLETED/CANCELLED) or is confirmed absent. If it doesn't resolve, keep the
+  tmux session, keep monitoring and report. (3) Only then close that one tmux session (`tmux kill-session -t <name>`). Closing tmux does not
   reliably end the job: one allocation stayed RUN and idled a GPU for 2 h 40 min after `exit` plus
   `kill-session`, once the agent hit its usage limit.
 - Never `tmux kill-server` on a shared login node. It ends every session you have there, including other

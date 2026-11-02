@@ -33,9 +33,17 @@ A loop that copies logs or checkpoints in the background must have its pid recor
 trap. A forgotten helper keeps the job alive after the work ends and can overwrite the final status.
 
 A helper started under `set -e` with an ERR trap dies at its first failing command, without a message. Run
-it in a subshell with errexit off (`( set +eE; trap - ERR; ... ) &`), and alert when the checkpoint it
-publishes is older than two intervals. If it died, restart it while the run continues. Killing the run
-because a helper died throws away every step since the last checkpoint that actually reached shared storage.
+it in a subshell with errexit and nounset off (`( set +eEu; trap - ERR; ... ) &`, see the job template), and
+alert when the checkpoint it publishes is older than two intervals. If it died, restart it while the run
+continues. Never kill the run because a helper died unless you have confirmed its progress is saved: that
+throws away every step since the last checkpoint that actually reached shared storage.
+
+## Walltime fitted to the measured rate
+
+Measure the rate after warm-up (the second epoch, or steps 100 to 300) and write the ETA to `status.json`.
+If the ETA is above 1.2x the time left before the limit, publish `last` first, then exit with a clear
+message ("rate too slow on this hardware"), instead of being killed at 8 % done. Before relaxing a request so
+the job can land on slower hardware, time one unit (an epoch, a shard) there and check the whole run fits.
 
 ## Child processes
 

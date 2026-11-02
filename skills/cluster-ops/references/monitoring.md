@@ -17,31 +17,47 @@ Bad:
 while true; do bjobs 1234; sleep 60; done      # blocks the session, never ends on its own
 ```
 
-Good: one background watcher that polls every 30 to 60 s and exits on a terminal state.
+Good: one background watcher that polls every 60 s and exits on a terminal state, a long PEND or an error.
 
 ```bash
-# LSF
-until s=$(bjobs -noheader -o stat 1234 2>/dev/null); [[ $s == DONE || $s == EXIT || -z $s ]]; do sleep 60; done; echo "$s"
+# LSF. UNTIL=RUN before a long handoff. Over ssh, put the ssh command inside the timeout.
+J=1234; UNTIL=END
+t0=$(date +%s)
+while :; do
+  r=$(timeout 60 bjobs -noheader -o stat "$J" 2>&1); rc=$?; s=${r##*$'\n'}
+  case $s in
+    DONE|EXIT) echo "$s"; break ;;
+    RUN) [[ $UNTIL == RUN ]] && { echo RUN; break; } ;;
+    PEND) (( $(date +%s) - t0 > 1800 )) && { echo PEND_30MIN; break; } ;;
+    UNKWN|PSUSP|USUSP|SSUSP) ;;   # UNKWN = lost node contact, not EXIT: keep polling
+    *) if [[ $r == *"is not found"* ]]; then echo GONE; else echo "ERROR rc=$rc: $r"; fi; break ;;
+  esac
+  sleep 60
+done
 # SLURM
 until s=$(sacct -n -X -P -j 1234 -o State 2>/dev/null | head -1); [[ $s =~ ^(COMPLETED|FAILED|CANCELLED|TIMEOUT|OUT_OF_MEMORY) ]]; do sleep 60; done; echo "$s"
 ```
 
-Run it with your harness's background facility (Claude Code: a background Bash call or Monitor. Codex: a
-background terminal). If the watcher runs over ssh, wrap each poll in `timeout 60` so a dead connection
-cannot hang it. If polls fail, check authentication first. An expired certificate does not kill jobs.
+What the output means:
 
-For waits longer than about an hour, end the session's wait instead of holding it open. Background commands
-in agent harnesses often time out near 2 h, and each wake after a prompt-cache expiry re-reads the whole
-context at full price. Write the job ids, expected outputs and the next step to a state file, then schedule
-one wake at the projected finish, or let a model-free watcher wake the agent only on a state change. Never a
-series of `sleep` calls.
+- `DONE`, `EXIT`, or `GONE` (a confirmed "is not found": finished and purged) are news, not verdicts. Read
+  `status.json`, the log and `bacct` (see "When it ends").
+- `PEND_30MIN`: report the pending reason from `bjobs -p -l` (`lsf.md`, "Why pending"). Don't re-arm silently.
+- `ERROR` (timeout, authentication or transport failure, or an empty reply) is not a job state. The job stays
+  tracked. Check authentication first (an expired certificate does not kill jobs), then run the loop again.
+- A `status.json` or checkpoint that stopped advancing while the job is RUN means a helper died or the job
+  hangs.
 
-A watcher reports more than DONE and EXIT:
+**Short waits (under about 1 h): wait inside one tool call** with the loop above, using your harness's
+background facility (a background command or monitor), or one foreground command within the tool timeout.
+Never a series of `sleep` tool calls or repeated short polls.
 
-- a PEND longer than you expected (say 30 min), with its pending reason. Don't re-arm silently.
-- an empty answer ("Job not found"): the job is finished and purged, so read `status.json`.
-- `UNKWN`: lost node contact, not a failure. Query again in a few minutes.
-- a `status.json` or checkpoint that stopped advancing while the job is RUN: a helper died or the job hangs.
+**Long waits (over about 1 h):** first run the loop with `UNTIL=RUN`, and hand off only a running job. A
+watcher that wakes on ended jobs does not wake on PEND, so a job still pending after 30 min is reported with
+its reason instead. Once it runs, write the job ids, expected outputs and the next step to a state file, then
+let a model-free watcher wake the agent on a state change, or schedule one wake at the projected finish.
+Background commands in agent harnesses often time out near 2 h, and each wake after a prompt-cache expiry
+re-reads the whole context at full price.
 
 ## When it ends
 

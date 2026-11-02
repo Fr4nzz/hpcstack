@@ -49,11 +49,10 @@ reflects the largest hosts and queues. Check GPU host groups with `bqueues -l gp
 
 - Start with `-gpu "num=1"`. The nf-core profile uses `-gpu 'num=1:j_exclusive=yes'` with
   `span[ptile=1]` for pipeline GPU tasks.
-- Add `gmem` only at about 1.3 x a measured peak of GPU memory. Large `gmem` values exclude every GPU
-  model that cannot meet them.
-- PEND messages such as "Affinity ... not enough processor units" or "no suitable hosts" also appear when
-  the `gmem` filter or a full queue is the real block, not only CPU binding. Read `bjobs -p -l` and
-  `bhosts -gpu -l` and change one thing at a time, GPU memory first, before cutting cores.
+- Set `gmem` to about 1.3 x a measured peak of GPU memory, no more. Check the smallest GPU the queue reaches
+  with `lshosts -gpu`. A job whose peak exceeds it and has no `gmem` floor can land there and run out of memory.
+- "Affinity ... not enough processor units" here also appears when the `gmem` filter or a full queue is the
+  real block. Diagnose it as in `cluster-ops/references/lsf.md` ("Why pending") before cutting cores.
 
 ## Nextflow
 
