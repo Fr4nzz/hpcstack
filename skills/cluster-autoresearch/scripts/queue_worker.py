@@ -14,6 +14,11 @@ Layout of Q: queue.jsonl (tasks), claims.jsonl (who took what), results/<id>.jso
 .lock. A task's command runs with cwd = the directory `add` was called from, in its own session, so
 the whole process group is killed on timeout. Tasks are claimed once. Re-queue a crashed task with a
 new id.
+
+Exit codes of `run`: 0 when the worker stopped normally (idle, max-hours, STOP), whatever the tasks'
+own results (read results/<id>.json). 128+N when signal N stopped it (bkill, scancel, the walltime warning
+sent by `bsub -wa USR2` or `sbatch --signal`): the running task's process group is stopped first and its
+result is written as "interrupted", so `done(<job>)` dependents do not fire on a half-drained queue.
 """
 import argparse
 import fcntl
@@ -66,6 +71,37 @@ def append_jsonl(path, obj):
         os.fsync(fh.fileno())
 
 
+class Interrupted(Exception):
+    def __init__(self, signum):
+        super().__init__(signum)
+        self.signum = signum
+
+
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGUSR2)
+
+
+def _on_signal(signum, frame):
+    for sig in STOP_SIGNALS:  # the scheduler often follows up (INT, TERM, KILL): finish the cleanup once
+        signal.signal(sig, signal.SIG_IGN)
+    raise Interrupted(signum)
+
+
+def stop_group(proc):
+    """TERM the task's process group, wait up to 30 s for the task, then KILL the group."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)  # the task's own children, or the task if it ignored TERM
+    except ProcessLookupError:
+        pass
+
+
 def now():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -109,7 +145,7 @@ def run_task(q, t, me, deadline):
     if timeout:
         limit = min(limit, timeout * 60)
     start = time.time()
-    status, rc = "done", None
+    status, rc, interrupted = "done", None, None
     with open(os.path.join(p["logs"], f"{t['id']}.log"), "w") as log:
         log.write(f"# {now()} {me}\n# {shlex.join(t['cmd'])}\n")
         log.flush()
@@ -126,12 +162,14 @@ def run_task(q, t, me, deadline):
                 status = "done" if rc == 0 else "failed"
             except subprocess.TimeoutExpired:
                 status = "timeout"
-                os.killpg(proc.pid, signal.SIGTERM)
-                try:
-                    rc = proc.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                    rc = proc.wait()
+                stop_group(proc)
+                rc = proc.wait()
+            except Interrupted as e:  # the worker itself got a signal: stop the task, record it, re-raise
+                interrupted = e
+                status = "interrupted"
+                stop_group(proc)
+                rc = proc.wait()
+                log.write(f"# {now()} worker got signal {e.signum}, task stopped\n")
             try:
                 os.killpg(proc.pid, signal.SIGKILL)  # orphans left in the task's session
             except ProcessLookupError:
@@ -143,6 +181,8 @@ def run_task(q, t, me, deadline):
     with open(tmp, "w") as fh:
         json.dump(res, fh, indent=1)
     os.replace(tmp, os.path.join(p["results"], f"{t['id']}.json"))
+    if interrupted is not None:
+        raise interrupted
     return res
 
 
@@ -154,6 +194,16 @@ def cmd_run(a):
     deadline = start + a.max_hours * 3600
     last_work = time.time()
     print(f"{now()} worker {me} started: idle-min {a.idle_min}, max-hours {a.max_hours}", flush=True)
+    for sig in STOP_SIGNALS:
+        signal.signal(sig, _on_signal)
+    try:
+        return _drain(a, p, me, deadline, last_work)
+    except Interrupted as e:
+        print(f"{now()} worker exits: signal {e.signum}", flush=True)
+        return 128 + e.signum
+
+
+def _drain(a, p, me, deadline, last_work):
     stop_reason = None
     while True:
         if os.path.exists(p["stop"]):
@@ -171,7 +221,16 @@ def cmd_run(a):
             time.sleep(min(a.poll_s, max(1.0, a.idle_min * 60 - idle * 60)))
             continue
         print(f"{now()} start {t['id']}", flush=True)
-        r = run_task(a.queue, t, me, deadline)
+        try:
+            r = run_task(a.queue, t, me, deadline)
+        except Interrupted:  # signal before the task started: still leave a result, not a ghost claim
+            rpath = os.path.join(p["results"], f"{t['id']}.json")
+            if not os.path.exists(rpath):
+                os.makedirs(p["results"], exist_ok=True)
+                with open(rpath, "w") as fh:
+                    json.dump({"id": t["id"], "status": "interrupted", "returncode": None, "worker": me, "runtime_s": 0.0,
+                               "end": now()}, fh, indent=1)
+            raise
         print(f"{now()} end   {t['id']} {r['status']} rc={r['returncode']} {r['runtime_s']}s", flush=True)
         last_work = time.time()
     print(f"{now()} worker exits: {stop_reason}", flush=True)
