@@ -57,6 +57,8 @@ Settings are environment variables, listed in the script header (`HPC_IDLE_MIN`,
 
 - An interactive allocation without `hpc-session` and a short walltime is a bug. Fix it before continuing.
 - Record the job id, tmux session name and purpose where the user can see it (status file or the chat).
+- Close the tmux session on the login node when the work is done (`tmux kill-session -t <name>`). Idle
+  sessions pile up: one user had 36 left over from a single month.
 - Ask for what a probe needs: 1 GPU, a few cores, memory from the last measurement. Use a CPU interactive
   queue for CPU-only work rather than holding a GPU.
 - When the probes end, exit the shell. The real run goes in as a batch job (`cluster-ops`).
