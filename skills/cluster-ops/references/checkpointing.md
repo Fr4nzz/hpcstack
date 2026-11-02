@@ -32,6 +32,11 @@ trap 'publish "$WORK/last.ckpt" "$OUT/last.ckpt"; exit 140' USR2
 A loop that copies logs or checkpoints in the background must have its pid recorded and killed in the EXIT
 trap. A forgotten helper keeps the job alive after the work ends and can overwrite the final status.
 
+A helper started under `set -e` with an ERR trap dies at its first failing command, without a message. Run
+it in a subshell with errexit off (`( set +eE; trap - ERR; ... ) &`), and alert when the checkpoint it
+publishes is older than two intervals. If it died, restart it while the run continues. Killing the run
+because a helper died throws away every step since the last checkpoint that actually reached shared storage.
+
 ## Child processes
 
 Start the main program in its own session (`setsid`) and kill the whole session at the end

@@ -57,11 +57,17 @@ Settings are environment variables, listed in the script header (`HPC_IDLE_MIN`,
 
 - An interactive allocation without `hpc-session` and a short walltime is a bug. Fix it before continuing.
 - Record the job id, tmux session name and purpose where the user can see it (status file or the chat).
-- Close the tmux session on the login node when the work is done (`tmux kill-session -t <name>`). Idle
-  sessions pile up: one user had 36 left over from a single month.
+- End in this order. (1) `exit` the shell inside the allocation. (2) Confirm with `bjobs`/`squeue` that the
+  allocation is gone. If it is still running after 30 s, check the id is yours, kill that exact id and check
+  the reply. (3) Only then close that one tmux session (`tmux kill-session -t <name>`). Closing tmux does not
+  reliably end the job: one allocation stayed RUN and idled a GPU for 2 h 40 min after `exit` plus
+  `kill-session`, once the agent hit its usage limit.
+- Never `tmux kill-server` on a shared login node. It ends every session you have there, including other
+  agents' live ones. Close stale sessions one by one after checking that each pane is an idle shell with no
+  child processes. Idle sessions pile up: one user had 36 left over from a single month.
 - Ask for what a probe needs: 1 GPU, a few cores, memory from the last measurement. Use a CPU interactive
   queue for CPU-only work rather than holding a GPU.
-- When the probes end, exit the shell. The real run goes in as a batch job (`cluster-ops`).
+- When the probes end, release the allocation as above. The real run goes in as a batch job (`cluster-ops`).
 - Never run a watchdog daemon on the login node or from cron. It belongs inside the allocation.
 - An agent-side stop hook that kills recorded jobs is a bonus, not a guarantee. It does not fire on every
   kind of stop.
@@ -71,5 +77,6 @@ Good: `hpc-session` with `-W 2:00`. The agent stops, the watchdog releases the G
 
 ## Done means
 
-- The allocation is gone (`bjobs`/`squeue` shows nothing for it), or it is still in active, logged use.
+- The allocation is gone, as shown by the scheduler (`bjobs`/`squeue`), not by closing the terminal, or it
+  is still in active, logged use.
 - If the watchdog released it, the log says why.

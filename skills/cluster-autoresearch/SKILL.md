@@ -55,6 +55,8 @@ bsub -q <gpu-queue> -n 4 -M 16000 -gpu "num=1" -W 8:00 -o q/worker.%J.out \
 - `touch q/STOP` makes workers finish their current task and exit.
 - For several workers, submit an array with a cap (`-J 'w[1-4]%4'`). Workers claim tasks with a file lock.
 - Results land in `q/results/<id>.json` (exit code, runtime) and logs in `q/logs/<id>.log`.
+- Each task checkpoints per unit, so a killed or slow worker redoes one task, not the wave. A task whose
+  worker host is overloaded can be killed and requeued once, and the requeue is recorded.
 
 ## Attribution
 

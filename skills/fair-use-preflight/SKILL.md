@@ -41,7 +41,13 @@ items that don't apply (mark them n/a).
 **Recovery and proof**
 - [ ] The job writes `status.json` and checkpoints, traps the walltime warning (`-wa USR2 -wt 10`), and
       cleans up on exit.
-- [ ] Dependencies use `done()`/`afterok` on job ids. No `|| true` around the real work.
+- [ ] Dependencies use `done()`/`afterok` on job ids, the upstream exits 0 after verified work, and its
+      EXIT trap cannot change that code. No `|| true` around the real work.
+- [ ] Background helper loops run with errexit off in their own subshell and their output is checked.
+- [ ] After a code-path change (imports, model, CPU versus GPU), imports and peak memory were probed again.
+- [ ] The walltime fits the measured rate on the hardware the request can land on.
+- [ ] CPU-only stages are not inside a GPU allocation.
+- [ ] No duplicate "hedge" copies of a job, and no kill lines in the submit script.
 - [ ] You know what "finished correctly" will look like (files, counts, checksums).
 
 ## Receipt

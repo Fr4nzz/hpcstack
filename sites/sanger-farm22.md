@@ -20,6 +20,10 @@ Internal documentation is not reproduced here. Verify every limit on the cluster
 - Users cannot extend a running job: `bmod -W` answers "Cannot change job options for a running job" for
   both interactive and batch jobs, although `LSB_MOD_ALL_JOBS=Y` is set (tested October 2026). Pick `-W`
   up front and resubmit if it runs out.
+- A running job's `-M` cannot be changed, and the site esub can refuse `bmod -R` or `bmod -mn` on pending
+  GPU jobs. Resubmit instead.
+- Users cannot ssh to compute nodes, so a running job cannot be rescued from outside. Anything it must
+  save has to be published by the job itself.
 - Idle-job exceptions: `bqueues -l <queue> | grep -A2 -i idle`. They notify only and are not defined on every
   queue, so they are no substitute for `safe-interactive`.
 
@@ -45,9 +49,11 @@ reflects the largest hosts and queues. Check GPU host groups with `bqueues -l gp
 
 - Start with `-gpu "num=1"`. The nf-core profile uses `-gpu 'num=1:j_exclusive=yes'` with
   `span[ptile=1]` for pipeline GPU tasks.
-- For small probes that can share a GPU, `mode=shared` with a `gmem` request leaves room for others. If a
-  shared request pends with "no suitable hosts", try plain `num=1`.
-- PEND messages about "affinity ... processor units" are about CPU binding, not GPUs.
+- Add `gmem` only at about 1.3 x a measured peak of GPU memory. Large `gmem` values exclude every GPU
+  model that cannot meet them.
+- PEND messages such as "Affinity ... not enough processor units" or "no suitable hosts" also appear when
+  the `gmem` filter or a full queue is the real block, not only CPU binding. Read `bjobs -p -l` and
+  `bhosts -gpu -l` and change one thing at a time, GPU memory first, before cutting cores.
 
 ## Nextflow
 

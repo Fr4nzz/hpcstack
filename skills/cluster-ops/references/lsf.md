@@ -24,10 +24,10 @@ for a running job". Test once on a throwaway `sleep` job. If it fails, choose `-
 | cores on one host | `-n 8 -R "span[hosts=1]"` |
 | memory | `-M 8000 -R "select[mem>=8000] rusage[mem=8000]"` |
 | walltime | `-W 4:00` (hours:minutes) |
-| GPU | `-gpu "num=1"`. Add `mode=shared` and `gmem=<n>G` only when you have a reason |
+| GPU | `-gpu "num=1"`. Add `gmem=<n>G` only at about 1.3x a measured GPU-memory peak (it excludes smaller GPUs) |
 | logs | `-o logs/%J.out -e logs/%J.err` (arrays: `%J.%I`) |
 | array with cap | `-J 'name[1-500]%50'`, index in `$LSB_JOBINDEX` |
-| dependency | `-w "done(<jobid>)"`. Prefer `done()` on ids over `ended()` on names |
+| dependency | `-w "done(<jobid>)"` on ids, only if the upstream script exits 0 after verified work and its EXIT trap keeps that code. For arrays whose elements may be killed and retried, use the retries' ids, or `ended(<id>)` plus a status check in the dependent job. Re-check with `bjobs -l` after any kill |
 | warning before kill | `-wa USR2 -wt 10` |
 | low priority | `-sp 1` |
 | pass parameters | `-env "all,PARAM=value"` or script arguments, never by editing the script |
@@ -58,6 +58,20 @@ bstop / bresume <id>
 bkill <id>               # exact id only. bkill -s USR2 <id> sends a signal instead
 ```
 
+- `bmod -M` or `-R` on a running job is often refused, and a site esub can refuse `bmod -R` on pending GPU
+  jobs too. Resubmit instead.
+- Check that the `bkill` reply says the job "is being terminated". Avoid `bkill -r`: it can leave ZOMBI jobs.
+- `-w` on an array with killed elements can fail with "No matching job found". Depend on the retries.
+
+## Odd states
+
+| State or reply | Meaning |
+|---|---|
+| `UNKWN` | the scheduler lost contact with the node, not EXIT. Query again in a few minutes |
+| "Job not found" | finished and purged from `bjobs`. Read the job's status file and `bacct` |
+| `ZOMBI` | a kill the scheduler could not confirm. Ignore it in watchers, report it once |
+| PEND with "Affinity ... not enough processor units" | no host fits the whole request (cores, memory or a `gmem` filter). See `cluster-ops`, "Why is it pending?" |
+
 ## Exit codes worth knowing
 
 | Code or reason | Meaning |
@@ -66,7 +80,8 @@ bkill <id>               # exact id only. bkill -s USR2 <id> sends a signal inst
 | `TERM_RUNLIMIT`, exit 140 | hit `-W` |
 | `TERM_OWNER` | you killed it |
 | `TERM_CPULIMIT` | CPU time limit |
-| exit 1 with "Successfully completed" never printed | the script failed. Read `.err` |
+| exit 1 with "Successfully completed" never printed | the script failed, or its EXIT trap returned non-zero after the work. Read `.err` and the status file |
+| exit 141 | `SIGPIPE`, often `pipefail` plus `cmd \| head`. Not a work failure in itself |
 
 ## Job exceptions
 

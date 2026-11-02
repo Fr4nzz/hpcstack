@@ -39,6 +39,11 @@ For Nextflow, read `-with-trace` (`%cpu`, `peak_rss`, `realtime`). For GPUs, sam
 - **GPU**: host RAM and VRAM are separate budgets. A CUDA OOM is not `TERM_MEMLIMIT`. A GPU under about
   80 % busy means the input pipeline is the bottleneck (`optimize-pipeline`), not that you need a second GPU.
 - **Java**: if memory grows until the kill, the heap is uncapped. See `genomics-jobs` (`-Xmx`).
+- **Pilots don't scale for free.** A peak measured on a pilot of N items is not the peak for 60 x N items.
+  Fit memory against input size or probe on a full-size shard first. A peak from another recipe or code
+  path is not a measurement either.
+- **Never set `-M` below the measured peak, or cores below the measured best, just to start sooner.** If
+  the measured request pends, find out why (`cluster-ops`, "Why is it pending?").
 - **Raising `-M` after every kill is not a fix.** Find what grows first.
 
 Bad: "It died at 30 GB, resubmit with 80 GB."

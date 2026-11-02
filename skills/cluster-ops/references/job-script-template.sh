@@ -20,6 +20,7 @@ OUT_DIR=${1:?usage: job.sh <out_dir>}
 JOBID=${LSB_JOBID:-${SLURM_JOB_ID:-manual$$}}
 NCPU=${LSB_DJOB_NUMPROC:-${SLURM_CPUS_PER_TASK:-1}}
 export OMP_NUM_THREADS=$NCPU OPENBLAS_NUM_THREADS=$NCPU MKL_NUM_THREADS=$NCPU
+# Data-loader trainings: set these to 1 inside each worker instead (see optimize-pipeline).
 
 # 3. Node-local work dir, proven local.
 WORK=${TMPDIR:-/tmp/$USER}/job_$JOBID
@@ -36,13 +37,18 @@ status() {  # status.json is overwritten in place: one file, fixed inode count
 }
 
 HELPERS=()
-cleanup() {
+cleanup() {  # must never change the exit code: every step `|| true`, then exit with the work's code
   local rc=$?
   for p in "${HELPERS[@]:-}"; do [[ -n $p ]] && kill "$p" 2>/dev/null || true; done
-  rm -rf "$WORK"
-  if (( rc == 0 )); then status "done"; else status failed "exit $rc"; fi
+  rm -rf "$WORK" || true
+  if (( rc == 0 )); then status "done" || true; else status failed "exit $rc" || true; fi
+  exit "$rc"
 }
 trap cleanup EXIT
+# Background helpers: a subshell with errexit and the ERR trap off, so a failed copy cannot kill it
+# silently. Record the pid. Check from outside that the published log keeps advancing.
+# ( set +eE; trap - ERR; while sleep 300; do cp -f "$WORK/log" "$OUT_DIR/log.tmp" && mv -f "$OUT_DIR/log.tmp" "$OUT_DIR/log" || echo "log copy failed" >&2; done ) &
+# HELPERS+=($!)
 trap 'status warned "walltime warning"; exit 140' USR2   # publish what you can here
 
 status running "start on $(hostname) with $NCPU cores"

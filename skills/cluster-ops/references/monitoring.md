@@ -30,7 +30,18 @@ Run it with your harness's background facility (Claude Code: a background Bash c
 background terminal). If the watcher runs over ssh, wrap each poll in `timeout 60` so a dead connection
 cannot hang it. If polls fail, check authentication first. An expired certificate does not kill jobs.
 
-For multi-hour jobs, a wake-up every 20 to 30 minutes that reads `status.json` is enough.
+For waits longer than about an hour, end the session's wait instead of holding it open. Background commands
+in agent harnesses often time out near 2 h, and each wake after a prompt-cache expiry re-reads the whole
+context at full price. Write the job ids, expected outputs and the next step to a state file, then schedule
+one wake at the projected finish, or let a model-free watcher wake the agent only on a state change. Never a
+series of `sleep` calls.
+
+A watcher reports more than DONE and EXIT:
+
+- a PEND longer than you expected (say 30 min), with its pending reason. Don't re-arm silently.
+- an empty answer ("Job not found"): the job is finished and purged, so read `status.json`.
+- `UNKWN`: lost node contact, not a failure. Query again in a few minutes.
+- a `status.json` or checkpoint that stopped advancing while the job is RUN: a helper died or the job hangs.
 
 ## When it ends
 
