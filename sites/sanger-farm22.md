@@ -49,8 +49,12 @@ reflects the largest hosts and queues. Check GPU host groups with `bqueues -l gp
 
 - Start with `-gpu "num=1"`. The nf-core profile uses `-gpu 'num=1:j_exclusive=yes'` with
   `span[ptile=1]` for pipeline GPU tasks.
-- Set `gmem` to about 1.3 x a measured peak of GPU memory, no more. Check the smallest GPU the queue reaches
-  with `lshosts -gpu`. A job whose peak exceeds it and has no `gmem` floor can land there and run out of memory.
+- Always set `gmem`, at about 1.3 x a measured peak of GPU memory, no more. Before a peak is measured, use
+  a modest floor such as 16G. GPUs are shared between jobs here unless you ask for exclusive mode, so another
+  job can already hold most of a GPU's memory: a plain `num=1` job ran out of memory at model load on a GPU
+  where another process held 76 GB. Check the smallest GPU the queue reaches with `lshosts -gpu`.
+- When GPU hosts are busy, free GPUs often have no free cores next to them, so `-n` decides the wait. Ask
+  for the measured busy cores plus one (`right-size-jobs`).
 - "Affinity ... not enough processor units" here also appears when the `gmem` filter or a full queue is the
   real block. Diagnose it as in `cluster-ops/references/lsf.md` ("Why pending") before cutting cores.
 

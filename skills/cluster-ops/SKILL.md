@@ -44,6 +44,9 @@ bsub -J name -q <queue> -n 4 -M 8000 -R "select[mem>=8000] rusage[mem=8000] span
 - Arrays: `-J 'name[1-500]%50'` with `%I` in log names. Housekeeping: add `-sp 1` (low priority).
 - `-wa USR2 -wt 10` sends USR2 ten minutes before the limit so the job can save and publish.
 - Before any submission run `fair-use-preflight`.
+- Before a GPU wave, dry-build every arm on CPU in the job's own environment: imports, then data assembly for
+  each arm. A stage moved from a workstation to a job counts as new code. One wave lost 6 of 9 GPU runs to
+  data-building crashes that a CPU check would have caught.
 - SLURM equivalents are in `references/slurm.md`. LSF details are in `references/lsf.md`.
 
 ## Job scripts
@@ -61,6 +64,10 @@ Start from `references/job-script-template.sh`. The parts that matter:
 - The walltime fits the measured rate, and the job saves and exits cleanly if it won't
   (`references/checkpointing.md`).
 - CPU-only stages (scoring with CPU models, packing, merging) go in CPU jobs, not inside a GPU allocation.
+- One bad input must not fail a whole shard or array element. Catch per-item read and decode errors, record
+  them in the receipt with the item id, and go on. Fail the job only above a stated error rate.
+- The EXIT trap copies the last ~20 kB of the node-local log to the shared run folder before it deletes the
+  work dir. Otherwise the log of a failed element is gone with the node's temp folder.
 - Replace a script that a running job uses by writing a new file and `mv`. Bash reads scripts as it goes, so
   editing in place corrupts running jobs. Call scripts as `bash script.sh` (copies lose the exec bit).
 - Guard only optional diagnostics with `|| true`. Never let `|| true`, `tee` or a trailing `echo` hide the
@@ -81,6 +88,9 @@ checkpoint and survive a kill (`references/checkpointing.md`).
 
 Downloads can arrive truncated without an error. Compare `sha256sum` on both sides before using a file.
 Check an exact path with `stat` before concluding a file is missing (a truncated listing lies).
+When you stream data over ssh (`ssh host 'tar -c …' > file`), the remote command must print nothing else on
+stdout. Run `bjobs` and other checks in a separate call, or they end up inside the archive.
+Before deleting data, see `storage-footprint`: the source data of a trained or deployed model is kept.
 
 ## Killing and replacing
 
@@ -92,7 +102,8 @@ Check an exact path with `stat` before concluding a file is missing (a truncated
 - A conditional approval ("stop it if progress is saved") is checked before killing. If it fails, ask.
 - No kill lines inside reusable submit scripts, no kills by name pattern, no `bkill -r` (it leaves zombie
   jobs). Say so when a checkpoint promised for a later resume is abandoned.
-- Dependencies only fire as intended if the upstream's exit code is right (`references/lsf.md`).
+- Dependencies only fire as intended if the upstream's exit code is right (`references/lsf.md`). When an
+  upstream fails, its `done()` dependents pend forever: kill them by exact id in the same step.
 
 ## Why is it pending?
 
@@ -106,8 +117,11 @@ Check an exact path with `stat` before concluding a file is missing (a truncated
 
 ## Access
 
-If the cluster uses short-lived certificates (Teleport, OIDC, Kerberos), renew before long waits. Expiry
-blinds monitoring but does not kill jobs. Re-authenticate before deciding anything about job state.
+If the cluster uses short-lived certificates (Teleport, OIDC, Kerberos), read the real validity (`tsh status`,
+`klist`) instead of assuming it: on one site it was 8 h, not the 12 h the notes said, and it expired three times
+in 27 h. Renew before a long wait or handoff when a watched job will end after the certificate does. Expiry
+blinds monitoring but does not kill jobs. Re-authenticate before deciding anything about job state, then
+re-check every watched job (`references/monitoring.md`).
 
 ## Done means
 

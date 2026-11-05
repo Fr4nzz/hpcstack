@@ -64,14 +64,22 @@ What the output means:
 
 **Short waits (under about 1 h): wait inside one tool call** with the loop above, using your harness's
 background facility (a background command or monitor), or one foreground command within the tool timeout.
-Never a series of `sleep` tool calls or repeated short polls.
+Never a series of `sleep` tool calls or repeated short polls. Set the background tool's own timeout above the
+loop's cap: a loop capped at 90 min inside a 30 min background slot is killed at 30 min.
 
 **Long waits (over about 1 h):** first run the loop with `UNTIL=RUN`, and hand off only a running job. A
 watcher that wakes on ended jobs does not wake on PEND, so a job still pending after 30 min is reported with
 its reason instead. Once it runs, write the job ids, expected outputs and the next step to a state file, then
-let a model-free watcher wake the agent on a state change, or schedule one wake at the projected finish.
+let a model-free watcher wake the agent on a state change. Prefer that to one wake at the projected finish:
+jobs end early or late, and a fixed-time wake left one finished result unread for almost 4 h.
 Background commands in agent harnesses often time out near 2 h, and each wake after a prompt-cache expiry
 re-reads the whole context at full price.
+
+**A wait lives in one session.** After a login expiry, a network outage, a provider error, or a move of the
+agent to another account, thread or machine, its pending wait may be gone. Whoever made the change re-checks
+every watched job at once (a purged job may need `bhist -n 10 -l <id>` on LSF) and re-arms a wait for each.
+"It was only waiting on the cluster" is not a reason to skip this: one result sat unread for 6.6 h that way.
+Never assume a watcher or a later poll will notice.
 
 ## When it ends
 
@@ -82,6 +90,9 @@ A terminal scheduler state is news, not a verdict. Check, in order:
    back", "retrying on CPU", "skipped".
 3. Output invariants: file exists, expected row or file count, checksum matches the receipt, the parser
    reads it.
-4. Resource use for the ledger (`right-size-jobs`).
+4. A worker or wrapper job's DONE says nothing about its tasks. One wave ended DONE with 6 of 9 runs crashed
+   while building their data. Read the per-task results file before reporting success.
+5. Resource use for the ledger (`right-size-jobs`). If the stage passed about 1.5x its planned GPU-h or
+   core-h, say so and why.
 
 Report what you verified and what you could not.

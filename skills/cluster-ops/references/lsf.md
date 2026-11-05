@@ -24,7 +24,7 @@ for a running job". Test once on a throwaway `sleep` job. If it fails, choose `-
 | cores on one host | `-n 8 -R "span[hosts=1]"` |
 | memory | `-M 8000 -R "select[mem>=8000] rusage[mem=8000]"` |
 | walltime | `-W 4:00` (hours:minutes) |
-| GPU | `-gpu "num=1"`. Set `gmem=<n>G` to about 1.3x a measured GPU-memory peak, no more. It is the floor that keeps the job off GPUs too small for it |
+| GPU | `-gpu "num=1:gmem=<n>G"`. Always set `gmem`: on sites where GPUs are shared between jobs, another job may already hold most of a GPU's memory, and a job without a floor can fail at model load. Use about 1.3x a measured GPU-memory peak, no more. Before you have a peak, use a modest floor such as 16G |
 | logs | `-o logs/%J.out -e logs/%J.err` (arrays: `%J.%I`) |
 | array with cap | `-J 'name[1-500]%50'`, index in `$LSB_JOBINDEX` |
 | dependency | `-w "done(<jobid>)"` on ids. See "Dependencies" below |
@@ -44,10 +44,13 @@ bjobs -l <id>                                    # RESOURCE USAGE, pending reaso
 bjobs -p -l <id>                                 # why pending
 bhist -l <id>                                    # timeline including pend time
 bacct -l <id>                                    # finished jobs (can be slow, avoid wide time ranges)
+bhist -n 10 -l <id>                              # purged jobs: searches older event files (10-30 s)
 bpeek <id>                                       # stdout so far
 ```
 
-Finished jobs drop out of `bjobs -a` after the site's clean period. The `.out` file of every job ends with a
+Finished jobs drop out of `bjobs -a` after the site's clean period, and can then be missing from plain `bacct`
+and `bhist -l` too. `bhist -n 10 -l <id>` searches the older event files. Give it a timeout of 120 s or more.
+Read the job's own status file first. The `.out` file of every job ends with a
 "Resource usage summary" (CPU time, max memory, run time). `right-size-jobs/scripts/jobeff --lsf-log` reads it.
 
 ## Modify and kill
@@ -69,6 +72,8 @@ bkill <id>               # exact id only. bkill -s USR2 <id> sends a signal inst
 - When an upstream may end non-zero with usable output (arrays with killed and retried elements, jobs whose
   cleanup you don't control), use `ended(<id>)` and have the dependent check every required output (status
   file, receipts, counts) first and exit non-zero if any is missing.
+- When an upstream job EXITs, its `done()` dependents stay PEND forever ("Dependency condition invalid or never
+  satisfied"). In the same step, `bkill` them by exact id, then resubmit the chain once the cause is fixed.
 - A dependency fails ("No matching job found") when the referenced job records have been purged, not because
   elements were killed. Use the real original or retry ids, and re-check dependents with `bjobs -l` after any
   kill.
@@ -93,7 +98,7 @@ GPU-hours training at 2 to 23 % GPU use that way.
 | State or reply | Meaning |
 |---|---|
 | `UNKWN` | the scheduler lost contact with the node, not EXIT. Query again in a few minutes |
-| "Job not found" | finished and purged from `bjobs`. Read the job's status file and `bacct` |
+| "Job not found" | finished and purged from `bjobs`. Read the job's status file, then `bhist -n 10 -l <id>` |
 | `ZOMBI` | a kill the scheduler could not confirm. Ignore it in watchers, report it once |
 | PEND with "Affinity ... not enough processor units" | no host fits the whole request. See "Why pending" above |
 

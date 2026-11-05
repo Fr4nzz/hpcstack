@@ -95,11 +95,12 @@ Version 0.1. The skills come from real use, but the helper scripts are new:
 
 - `safe-interactive/scripts/hpc-session` was tested on real LSF jobs (CPU and GPU queues): it stays out of
   the way while the job works or the user types, and releases the job once both stop. A busy GPU with idle
-  CPU keeps the job (tested). Not yet tested on SLURM.
+  CPU keeps the job (tested with shortened idle settings, not the 30 min default). Not yet tested on SLURM,
+  with several GPUs in one job, or with another tenant on the same GPU.
 - `jobeff` and `quota_report.sh` were run against live LSF and Lustre. `queue_worker.py` ran LSF batch
   workers: failing, timed-out and crashing tasks were recorded without stopping the queue, the worker exited
   0 and its `done()` dependent ran. A worker signalled with USR2 exited 140, so its `done()` dependent never
-  fired. `listing_job.sh`, `analyse_listing.py`, `results_tsv.py` and `plot_progress.py` were tested on synthetic
+  fired. Several workers sharing one queue are not yet tested. `listing_job.sh`, `analyse_listing.py`, `results_tsv.py` and `plot_progress.py` were tested on synthetic
   inputs (fake `lfs`, local directories), not yet on a cluster. SLURM paths are untested.
 
 Reports of what breaks on your cluster are the most useful issues you can open.

@@ -40,7 +40,7 @@ Goal: no interactive allocation outlives its usefulness by more than about 30 mi
    srun --cpus-per-task=2 --mem=4G --time=02:00:00 --pty /path/to/scripts/hpc-session-slurm
    ```
 3. **The watchdog** inside the wrapper. Every command you send (typed or `tmux send-keys`) refreshes a
-   heartbeat through `PROMPT_COMMAND`, so no extra discipline is needed. Every 60 s it checks, and releases
+   heartbeat through `PROMPT_COMMAND`, so no extra discipline is needed. About every 60 s (`HPC_CHECK_S`) it checks, and releases
    the job only when **all three** hold:
    - the heartbeat is older than `HPC_IDLE_MIN` (default 30)
    - job CPU over the last 5 minutes is below 0.1 core (cgroup v2 `cpu.stat`, cgroup v1 `cpuacct.usage`,
@@ -53,6 +53,13 @@ Goal: no interactive allocation outlives its usefulness by more than about 30 mi
    A long training started inside the shell keeps the job alive while it computes. When it ends and nobody
    types, the job goes after `HPC_IDLE_MIN`. Each decision is logged to `~/.hpc-session/<jobid>.log`.
    If CPU cannot be measured, the watchdog never kills and the walltime is the only backstop.
+
+   A GPU pause with low CPU that lasts longer than the CPU window (`HPC_CPU_WINDOW_S`, default 300 s) still
+   counts as idle, so a typing-free job with long CPU-light pauses (large evaluations, slow checkpoint
+   uploads) can be released. Raise the window for such jobs. The busy-GPU case was tested with shortened
+   settings (`HPC_IDLE_S=180 HPC_CPU_WINDOW_S=120`): the job survived short GPU pauses and was released about
+   3.5 min after the work stopped. Not yet tested: several GPUs in one job, another tenant on the same GPU,
+   and the scheduler's own pre-kill warning.
 
 Settings are environment variables, listed in the script header (`HPC_IDLE_MIN`, `HPC_CPU_IDLE_CORES`,
 `HPC_GPU_IDLE_PCT`, `HPC_DRY_RUN`, ...).

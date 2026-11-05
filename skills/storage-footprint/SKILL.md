@@ -58,10 +58,17 @@ processes on the same disk at once. Check known caches first (`~/.cache/pip`, `~
 2. Pack small-file trees with `tar --zstd -cf x.tar.zst DIR`, then verify (entry count from `tar -tf`
    equals the file count, plus a sha256 manifest of the originals) before removing the originals.
 3. Never touch other users' files. Log every deletion (path, size, files, time).
-4. Run `quota_report.sh` again and report before and after.
+4. Never delete the source data of a trained or deployed model (the images, reads or tables it was built
+   from), even when an old brief says "delete after extraction". If its file count is the problem, pack it
+   into plain tars with a ledger and sha256 manifest under a permanent folder with a README. Packing fixes
+   an inode quota without losing anything. One team deleted the 32,000 source photos behind a live model
+   this way.
+5. Run `quota_report.sh` again and report before and after.
 
 ## Prevention
 
+- Check that every input a model or pipeline needs exists on the cluster's shared storage, not only on a
+  workstation, before it becomes the only copy that matters.
 - Write the expected number of new files before submitting a job. Above about 50 per run, pack them.
 - Expand archives on node-local disk inside jobs. Prove the path is local with `findmnt -T`.
 - Gate submissions on quota: `quota_report.sh <mount> <group> --gate` exits non-zero above 95 % of a
