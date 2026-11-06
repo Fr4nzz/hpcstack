@@ -84,7 +84,8 @@ scripts/queue_worker.py preempt --queue q/ --task w04_full --reason "ablation de
 - `preempt` writes `q/preempt/<id>.json` and signals nothing. Within about 10 s the worker sends the task's
   process group `--preempt-signal` (default TERM), waits up to `--preempt-grace` (120 s, capped by the time
   left) for the whole group, then KILLs it. The task is recorded as `preempted`, logged in `q/preempt.log`,
-  and re-queued at its own priority, ahead of the other tasks of that priority, with its `--resume-cmd`.
+  and re-queued at its own priority with its `--resume-cmd`: a normal task ahead of the other normal
+  tasks, a high task behind the high tasks already waiting.
   With one worker, the queued high task runs next in the same allocation.
 - The preempted run loses the work since its last checkpoint, for example up to one epoch when the trainer
   resumes from its last-epoch checkpoint. Without `--resume-cmd` it restarts from scratch.

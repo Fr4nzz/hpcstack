@@ -27,9 +27,10 @@ sends the task's process group --preempt-signal so it can checkpoint and exit, w
 seconds for every process in the group (not only the leader), then KILLs the group. The grace is capped
 by the task's and the worker's remaining time. With no time left the run counts as a timeout. The task's
 result is "preempted", one line goes to preempt.log, and the task goes back into the queue at its own
-priority, ahead of the other tasks of that priority, running its --resume-cmd
-(or the original command, which restarts from scratch). The worker then claims the next task, normally
-the high-priority one that motivated the preemption. A task is preempted at most twice. Use this only on
+priority, running its --resume-cmd (or the original command, which restarts from scratch). A normal task
+goes ahead of the other normal tasks. A high task goes behind the high tasks already waiting, so it does
+not displace the work it was preempted for. The worker then claims the next task, normally the
+high-priority one that motivated the preemption. A task is preempted at most twice. Use this only on
 your own queue and your own jobs. The idle exit stays on, so no allocation is held empty.
 --resume-cmd is split like a shell line but not run by a shell. Wrap it in `bash -c '...'` for pipes.
 
@@ -198,11 +199,13 @@ def attempt_of(entry):
 
 
 def queue_state(q):
-    """Latest queue entry per task id (in first-seen order), and the set of claimed (id, attempt)."""
+    """Latest queue entry per task id (ordered by the position of that latest line), and the set of
+    claimed (id, attempt)."""
     p = paths(q)
     latest = {}
     for t in read_jsonl(p["queue"]):
         if t["id"] not in latest or attempt_of(t) >= attempt_of(latest[t["id"]]):
+            latest.pop(t["id"], None)  # a re-queued attempt takes its new place in line
             latest[t["id"]] = t
     claims = {}
     for c in read_jsonl(p["claims"]):
@@ -256,10 +259,13 @@ def claim(q, me, deadline=None, grace=None):
 
 
 def requeue_entries(t, me, reason, runtime_s):
-    """The queue line that puts a preempted task back at the front of its own priority, and its log line."""
+    """The queue line that re-queues a preempted task at its own priority, and its log line. Below high it
+    goes to the front of its priority. A high task goes behind the high tasks already waiting, so it does
+    not resume at once ahead of the work it was preempted for."""
     n = int(t.get("preempts", 0)) + 1
     resume = t.get("resume_cmd")
-    new = dict(t, attempt=attempt_of(t) + 1, preempts=n, front=True, requeued=now(),
+    front = PRIORITY_RANK.get(t.get("priority", "normal"), 1) > PRIORITY_RANK["high"]
+    new = dict(t, attempt=attempt_of(t) + 1, preempts=n, front=front, requeued=now(),
                cmd=resume or t["cmd"], prior_runtime_s=round(float(t.get("prior_runtime_s", 0)) + runtime_s, 1))
     logline = {"time": now(), "task": t["id"], "attempt": attempt_of(t), "worker": me, "job": job_id(),
                "host": socket.gethostname(), "reason": reason, "runtime_s": round(runtime_s, 1),
@@ -291,13 +297,17 @@ def preempt_request(q, t):
     if not os.path.exists(path):
         return None
     req = read_json(path) or {}
-    if attempt_of(req) != attempt_of(t) or int(t.get("preempts", 0)) >= MAX_PREEMPTS:
-        try:
-            os.remove(path)
-        except FileNotFoundError:
-            pass
-        return None
-    return req
+    stale = attempt_of(req) != attempt_of(t) or int(t.get("preempts", 0)) >= MAX_PREEMPTS
+    if not stale:
+        return req
+    with locked(q):  # re-read under the lock `preempt` holds while it writes: it may have just replaced it
+        req = read_json(path) if os.path.exists(path) else None
+        if req is None:
+            return None
+        if attempt_of(req) == attempt_of(t) and int(t.get("preempts", 0)) < MAX_PREEMPTS:
+            return req
+        os.remove(path)
+    return None
 
 
 def run_task(q, t, me, deadline, opts=None):
@@ -523,8 +533,8 @@ def cmd_status(a):
             if c.get("deadline"):
                 s += f", worker deadline in {fmt_min(max(0.0, float(c['deadline']) - time.time()))}"
         else:
-            s = "queued" + (" (resume)" if t.get("front") and t.get("resume_cmd") else
-                            " (restart)" if t.get("front") else "")
+            s = "queued" + (" (resume)" if attempt_of(t) and t.get("resume_cmd") else
+                            " (restart)" if attempt_of(t) else "")
         print(f"{t['id']}\t{t.get('priority', 'normal')}\tpreempts={t.get('preempts', 0)}\t{s}")
     if os.path.isdir(p["preempt"]):
         for f in sorted(os.listdir(p["preempt"])):

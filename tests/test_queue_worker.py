@@ -386,15 +386,40 @@ def test_stale_request_from_older_attempt_is_overwritten(env):
     assert req["attempt"] == 1 and req["reason"] == "new"
 
 
-def test_preempted_high_task_stays_high_at_front(qwm, tmp_path, monkeypatch):
+def test_preempted_high_task_queues_behind_waiting_high_task(qwm, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     q = str(tmp_path / "q")
-    for tid, prio in [("h1", "high"), ("h2", "high"), ("n1", "normal")]:
+    for tid, prio in [("h_old", "high"), ("n1", "normal")]:
         qwm.main(["add", "--queue", q, "--id", tid, "--priority", prio, "--", "true"])
     t = qwm.claim(q, "w")
-    assert t["id"] == "h1"
+    assert t["id"] == "h_old"
+    # the new high task is added before preempting h_old for it
+    qwm.main(["add", "--queue", q, "--id", "h_new", "--priority", "high", "--", "true"])
     new, line = qwm.requeue_entries(t, "w", "r", 1.0)
-    qwm.publish_result(q, t, {"id": "h1", "status": "preempted", "attempt": 0}, (new, line))
-    nxt = qwm.claim(q, "w")
-    assert (nxt["id"], nxt["attempt"], nxt["priority"]) == ("h1", 1, "high")
-    assert [qwm.claim(q, "w")["id"] for _ in range(2)] == ["h2", "n1"]
+    assert new["priority"] == "high" and new["front"] is False
+    qwm.publish_result(q, t, {"id": "h_old", "status": "preempted", "attempt": 0}, (new, line))
+    got = [qwm.claim(q, "w") for _ in range(3)]
+    assert [(x["id"], x.get("attempt", 0)) for x in got] == [("h_new", 0), ("h_old", 1), ("n1", 0)]
+
+
+def test_stale_request_cleanup_does_not_delete_fresh_request(qwm, tmp_path, monkeypatch):
+    # interleaving: the worker reads a stale attempt-0 request, `preempt` then writes the attempt-1
+    # request and reports success, then the worker cleans up. The fresh request must survive.
+    q = tmp_path / "q"
+    t = claimed_task(qwm, q, attempt=1, preempts=1)
+    write_request(qwm, q, attempt=0)
+    real_read = qwm.read_json
+    state = {"done": False}
+
+    def read_then_preempt(path):
+        out = real_read(path)
+        if path.endswith(os.path.join("preempt", "x.json")) and not state["done"]:
+            state["done"] = True
+            assert qwm.main(["preempt", "--queue", str(q), "--task", "x", "--reason", "fresh"]) == 0
+        return out
+
+    monkeypatch.setattr(qwm, "read_json", read_then_preempt)
+    req = qwm.preempt_request(str(q), t)
+    assert state["done"]
+    assert req is not None and req["attempt"] == 1 and req["reason"] == "fresh"
+    assert json.loads((q / "preempt" / "x.json").read_text())["attempt"] == 1
