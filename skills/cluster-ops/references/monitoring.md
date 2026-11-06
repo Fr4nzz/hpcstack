@@ -58,6 +58,8 @@ What the output means:
 - `PEND_LONG`: report the pending reason from `bjobs -p -l` (`lsf.md`, "Why pending"). If the request is
   over-strict, fix it. Otherwise hand off anyway (state file and job file, with the pending reason sent to whoever must act) or
   re-run the `UNTIL=RUN` loop and say so. Never leave a pending job with no handoff.
+- Pending jobs submitted through `pendlog submit` (`right-size-jobs`): run `pendlog started --out DIR` every
+  10 to 15 min, or from the wait loop, so their start, PEND and pending reason are logged.
 - `ZOMBI`: report once and read `bacct`. Don't re-run the loop on it.
 - `CAP_REACHED`: the loop hit its own limit before the job changed state. Not news about the job: hand off
   (state file and job file) or run the loop again in a new tool call with the `T0=` value it printed. `PEND_S` is

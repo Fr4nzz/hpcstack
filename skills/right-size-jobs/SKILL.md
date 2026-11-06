@@ -67,6 +67,24 @@ Bad: "It died at 30 GB, resubmit with 80 GB."
 Good: "Peak was 7.4 GB per JVM with no `-Xmx`. The heap grew to the limit. Set `-Xmx6g`, `-M 8000`, and
 check the next peak."
 
+## Wait risk
+
+PEND time can't be predicted from the request yet. Cluster-wide load drives the long waits, and accounting
+doesn't keep it. A study of one user's 10,490 LSF jobs found no model that caught any GPU-queue wait over 1 h.
+What the request does change is the risk:
+
+- **GPU memory above the smallest large-GPU class** (gmem over 32G there) sharply raises the wait risk on a
+  busy cluster: +28 points in the chance of waiting over 1 h. Fit under it when the measured peak allows
+  (smaller batch, half precision), but never below 1.3 x the measured GPU-memory peak.
+- **Cutting cores** showed no average effect. It helps only when LSF's pending reason says the fitting hosts
+  are short of cores.
+- **Model or host pins** add risk.
+
+Submit through `scripts/pendlog submit --out DIR -- bsub ...` so the data grows, and schedule
+`scripts/pendlog started --out DIR` every 10 to 15 min while jobs pend. Before a wave, run
+`scripts/pend-risk --history jobs.csv --request "<bsub args>"` on `pendlog export` output or an accounting
+CSV. It prints how often similar recent jobs waited over 1 h, never an ETA. Both are UNTESTED on a cluster.
+
 ## Flags from `jobeff`
 
 | Flag | Meaning | Action |

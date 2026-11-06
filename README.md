@@ -103,6 +103,9 @@ Version 0.1. The skills come from real use, but the helper scripts are new:
   fired. Several workers sharing one queue are not yet tested. Its priorities and `preempt` (stop one of
   your own running tasks, re-queue it with a resume command, and run a high-priority task in the same
   allocation) are tested on synthetic tasks only (`tests/test_queue_worker.py`), not yet on a cluster.
+- `pendlog` (queue snapshots and PEND times at submit) and `pend-risk` (share of similar recent jobs that
+  waited over 1 h, no ETA) are UNTESTED on a cluster: tested with fake LSF commands and synthetic histories
+  only (`tests/test_pendlog.py`). Their SLURM paths are untested.
 - `listing_job.sh`, `analyse_listing.py`, `results_tsv.py` and `plot_progress.py` were tested on synthetic
   inputs (fake `lfs`, local directories), not yet on a cluster. SLURM paths are untested.
 

@@ -1,0 +1,614 @@
+#!/usr/bin/env python3
+"""pendlog: log queue snapshots and your own PEND times, so wait risk can be judged from data later.
+
+UNTESTED on a real cluster: tested only with fake bqueues/bhosts/bjobs/bhist/bsub (tests/test_pendlog.py).
+LSF first. SLURM paths (squeue, sinfo, sshare, sacct, sbatch) are thinner and untested.
+
+Usage:
+  pendlog snapshot --queue Q [--hosts-from-request "<bsub -R/-gpu/-n args>"] --out DIR
+  pendlog submit --out DIR [--stdin-script] -- bsub <args...>
+  pendlog started --out DIR [--since H]
+  pendlog export --out DIR > jobs.csv
+
+snapshot  Runs light commands only, each with a timeout (--timeout, default 20 s): `bqueues Q`,
+          `bhosts -gpu -w` and `bhosts -w <gpu hosts>` when the request asks for a GPU, your own RUN and
+          PEND counts from `bjobs -u $USER`, and your fairshare line from `bqueues -r Q`. Appends one JSON
+          line to DIR/snapshots.jsonl. It never fails: errors go into the line's "errors" list, exit 0.
+submit    Takes a snapshot, runs the bsub (or sbatch) command, records the job id and the full request in
+          DIR/jobs.jsonl, prints the command's output unchanged and exits with its exit code. Options are
+          read from the command line only. With --stdin-script, stdin is read, its #BSUB lines are parsed
+          too, and it is passed on to bsub (for `pendlog submit --stdin-script -- bsub < job.sh`).
+started   For logged jobs with no start yet (submitted in the last --since hours, default 72), reads the
+          state, start time, PEND seconds and pending reason with one
+          `bjobs -o "jobid jobindex stat submit_time start_time pend_time pend_reason" -json` call, falling
+          back to `bhist -n 10 -l` for purged jobs. Appends one line per job to DIR/jobs.jsonl. Schedule it
+          every 10 to 15 min while jobs pend, or call it from a wait loop.
+export    One CSV row per logged job: the request, the snapshot at submit, PEND seconds and the last
+          pending reason. Feed it to `pend-risk --history`.
+
+Units: -M and gmem without a unit are read as MB. GPU memory is reported in GiB (MB / 1024), so gmem=32G
+is 32. Host fitting is approximate: free slots from bhosts, free GPU memory = memory in the model name
+(e.g. ..._80GB) minus MRSV.
+"""
+import argparse
+import csv
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+
+TIMEOUT = 20
+UNIT_MB = {"": 1.0, "k": 1 / 1024, "m": 1.0, "g": 1024.0, "t": 1024.0 ** 2}
+RUN_STATES = {"RUN", "DONE", "USUSP", "SSUSP", "RUNNING", "COMPLETED", "SUSPENDED"}
+
+
+# ---------------------------------------------------------------- request parsing
+def mem_mb(text, default_unit="m"):
+    """'32G', '32768', '16000M', '40960.00' -> MB. None if absent."""
+    if text is None:
+        return None
+    m = re.match(r"^\s*([\d.]+)\s*([kKmMgGtT]?)[bB]?\s*$", str(text))
+    if not m or m.group(1) in ("", "."):
+        return None
+    return float(m.group(1)) * UNIT_MB[(m.group(2) or default_unit).lower()]
+
+
+def parse_gpu(spec):
+    """'num=1:gmem=32G:gmodel=NVIDIAA100_SXM4_80GB:j_exclusive=yes' -> dict."""
+    out = {}
+    for part in str(spec or "").split(":"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k.strip().lower()] = v.strip()
+    return out
+
+
+def bsub_lines(script_text):
+    """#BSUB option lines of a job script -> list of args."""
+    args = []
+    for line in script_text.splitlines():
+        s = line.strip()
+        if s.startswith("#BSUB"):
+            try:
+                args += shlex.split(s[len("#BSUB"):])
+            except ValueError:
+                pass
+    return args
+
+
+def parse_request(args):
+    """bsub (or sbatch) arguments -> request dict. Unknown options are ignored."""
+    args = list(args)
+    if args and os.path.basename(args[0]) in ("bsub", "sbatch"):
+        args = args[1:]
+    r = {"queue": None, "cores": None, "mem_mb": None, "gpu_num": None, "gmem_gb": None, "gmodel": "",
+         "j_exclusive": False, "pin": False, "host_incl": [], "host_excl": [], "array_size": 1,
+         "runlimit": None, "resreq": []}
+    with_val = {"-q", "-n", "-M", "-R", "-gpu", "-J", "-m", "-W", "-o", "-e", "-P", "-G", "-w", "-cwd",
+                "-p", "--partition", "-c", "--cpus-per-task", "--mem", "--gres", "--gpus", "-t", "--time"}
+    i = 0
+    while i < len(args):
+        a = args[i]
+        val = None
+        if "=" in a and a.startswith("--"):
+            a, val = a.split("=", 1)
+        elif a in with_val and i + 1 < len(args):
+            val = args[i + 1]
+            i += 1
+        elif not a.startswith("-"):
+            break  # the command starts here
+        if a in ("-q", "-p", "--partition"):
+            r["queue"] = val
+        elif a in ("-n", "-c", "--cpus-per-task"):
+            try:
+                r["cores"] = int(str(val).split(",")[-1])
+            except ValueError:
+                pass
+        elif a in ("-M", "--mem"):
+            r["mem_mb"] = mem_mb(val)
+        elif a == "-W" or a in ("-t", "--time"):
+            r["runlimit"] = val
+        elif a == "-m":
+            r["host_incl"] += str(val).split()
+        elif a == "-J":
+            m = re.search(r"\[(.*?)\]", str(val))
+            if m:
+                n = 0
+                for part in m.group(1).split(","):
+                    rng = re.match(r"(\d+)(?:-(\d+))?(?::(\d+))?", part)
+                    if rng:
+                        lo, hi, step = int(rng.group(1)), int(rng.group(2) or rng.group(1)), int(rng.group(3) or 1)
+                        n += len(range(lo, hi + 1, step))
+                r["array_size"] = max(n, 1)
+        elif a == "-R":
+            r["resreq"].append(val)
+            r["host_incl"] += re.findall(r"hname\s*==\s*'?([\w.-]+)'?", str(val))
+            r["host_excl"] += re.findall(r"hname\s*!=\s*'?([\w.-]+)'?", str(val))
+            m = re.search(r"rusage\[[^\]]*\bmem=([\d.]+[kKmMgGtT]?)", str(val))
+            if m and r["mem_mb"] is None:
+                r["mem_mb"] = mem_mb(m.group(1))
+        elif a == "-gpu":
+            g = parse_gpu(val)
+            if "num" in g:
+                try:
+                    r["gpu_num"] = int(float(g["num"]))
+                except ValueError:
+                    pass
+            elif val is not None:
+                r["gpu_num"] = 1
+            gm = mem_mb(g.get("gmem"))
+            r["gmem_gb"] = round(gm / 1024, 2) if gm else None
+            r["gmodel"] = g.get("gmodel", "")
+            r["j_exclusive"] = g.get("j_exclusive", "").lower() == "yes"
+        elif a in ("--gres", "--gpus"):
+            m = re.search(r"gpu(?::([\w-]+))?(?::(\d+))?", str(val)) if a == "--gres" else None
+            r["gpu_num"] = int(m.group(2) or 1) if m else (int(val) if str(val).isdigit() else 1)
+            if m and m.group(1) and not m.group(1).isdigit():
+                r["gmodel"] = m.group(1)
+        i += 1
+    r["pin"] = bool(r["gmodel"] and r["gmodel"].upper() != "NVIDIA") or bool(r["host_incl"])
+    return r
+
+
+# ---------------------------------------------------------------- commands
+def run(cmd, timeout=None, errors=None):
+    """Run a command with a timeout. Returns stdout, or None (and notes the error)."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout or TIMEOUT)
+    except FileNotFoundError:
+        if errors is not None:
+            errors.append(f"{cmd[0]}: not found")
+        return None
+    except subprocess.TimeoutExpired:
+        if errors is not None:
+            errors.append(f"{' '.join(cmd[:3])}: timeout after {timeout or TIMEOUT} s")
+        return None
+    except OSError as e:
+        if errors is not None:
+            errors.append(f"{cmd[0]}: {e}")
+        return None
+    if p.returncode != 0 and not p.stdout.strip():
+        if errors is not None:
+            errors.append(f"{' '.join(cmd[:3])}: rc={p.returncode} {p.stderr.strip()[:200]}")
+        return None
+    return p.stdout
+
+
+def scheduler():
+    if shutil.which("bqueues") or shutil.which("bjobs"):
+        return "lsf"
+    if shutil.which("squeue"):
+        return "slurm"
+    return "none"
+
+
+def table(text):
+    """Whitespace table with a header line -> list of dicts (extra columns ignored)."""
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return []
+    head = lines[0].split()
+    return [dict(zip(head, ln.split())) for ln in lines[1:]]
+
+
+def to_int(x):
+    try:
+        return int(float(x))
+    except (TypeError, ValueError):
+        return None
+
+
+def gpu_mem_from_model(model):
+    m = re.search(r"(\d+)\s*GB", str(model), re.I)
+    return float(m.group(1)) if m else None
+
+
+def parse_bhosts_gpu(text):
+    """`bhosts -gpu -w` -> {host: [gpu dicts]}. Continuation lines have no host name."""
+    hosts, cur = {}, None
+    for ln in (text or "").splitlines():
+        if not ln.strip() or ln.lstrip().startswith("HOST_NAME"):
+            continue
+        parts = ln.split()
+        if not ln[0].isspace():
+            cur, parts = parts[0], parts[1:]
+            hosts.setdefault(cur, [])
+        if cur is None or len(parts) < 4:
+            continue
+        gpu = {"id": parts[0], "model": parts[1], "mused_gb": round((mem_mb(parts[2]) or 0) / 1024, 1),
+               "mrsv_gb": round((mem_mb(parts[3]) or 0) / 1024, 1),
+               "njobs": to_int(parts[4]) if len(parts) > 4 else None}
+        gpu["mem_gb"] = gpu_mem_from_model(gpu["model"])
+        hosts[cur].append(gpu)
+    return hosts
+
+
+def host_fits(req, host, gpus, slots):
+    """Can this host take the shape now? Approximate. None if unknown."""
+    if host in req.get("host_excl", []) or (req.get("host_incl") and host not in req["host_incl"]):
+        return False
+    gm = req.get("gmodel") or ""
+    if gm and gm.upper() != "NVIDIA" and not all(g["model"] in gm or gm in g["model"] for g in gpus[:1]):
+        return False
+    if slots is not None:
+        if slots.get("status") not in ("ok", None):
+            return False
+        if req.get("cores") and slots.get("free") is not None and slots["free"] < req["cores"]:
+            return False
+    need = req.get("gpu_num") or 1
+    free = 0
+    for g in gpus:
+        if req.get("j_exclusive") and g.get("njobs"):
+            continue
+        if req.get("gmem_gb"):
+            if g.get("mem_gb") is None:
+                return None
+            if g["mem_gb"] - g.get("mrsv_gb", 0) < req["gmem_gb"]:
+                continue
+        free += 1
+    return free >= need
+
+
+def snapshot_lsf(queue, req, errors, user):
+    s = {}
+    q = table(run(["bqueues", queue], errors=errors))
+    if q:
+        row = q[0]
+        s["queue_njobs"], s["queue_pend"], s["queue_run"] = (to_int(row.get(k)) for k in ("NJOBS", "PEND", "RUN"))
+        s["queue_status"] = row.get("STATUS")
+    out = run(["bjobs", "-u", user, "-noheader", "-o", "stat queue"], errors=None)
+    own = {}
+    for ln in (out or "").splitlines():
+        p = ln.split()
+        if len(p) >= 2:
+            key = f"{p[1]}:{p[0]}"
+            own[key] = own.get(key, 0) + 1
+    s["own_run_q"] = own.get(f"{queue}:RUN", 0)
+    s["own_pend_q"] = own.get(f"{queue}:PEND", 0)
+    s["own_run_all"] = sum(v for k, v in own.items() if k.endswith(":RUN"))
+    s["own_pend_all"] = sum(v for k, v in own.items() if k.endswith(":PEND"))
+    fs = run(["bqueues", "-r", queue], errors=errors)
+    for ln in (fs or "").splitlines():
+        p = ln.split()
+        if p and p[0].rstrip("/") == user and len(p) >= 3:
+            s["fairshare_shares"], s["fairshare_priority"] = p[1], p[2]
+            break
+    if req.get("gpu_num") or req.get("gmem_gb") or req.get("gmodel"):
+        gpu_hosts = parse_bhosts_gpu(run(["bhosts", "-gpu", "-w"], errors=errors))
+        slots = {}
+        if gpu_hosts:
+            for row in table(run(["bhosts", "-w", *sorted(gpu_hosts)], errors=errors)):
+                mx, nj = to_int(row.get("MAX")), to_int(row.get("NJOBS"))
+                free = mx - nj if mx is not None and nj is not None else None
+                slots[row.get("HOST_NAME")] = {"status": row.get("STATUS"), "free": free}
+        hosts = []
+        for h, gpus in sorted(gpu_hosts.items()):
+            fit = host_fits(req, h, gpus, slots.get(h))
+            hosts.append({"host": h, "status": (slots.get(h) or {}).get("status"),
+                          "free_slots": (slots.get(h) or {}).get("free"), "fits": fit,
+                          "gpus": [[g["model"], g["mem_gb"], g["mrsv_gb"], g["njobs"]] for g in gpus]})
+        s["gpu_hosts"] = hosts
+        s["hosts_total"] = len(hosts)
+        s["hosts_fit"] = sum(1 for h in hosts if h["fits"])
+    return s
+
+
+def snapshot_slurm(queue, req, errors, user):
+    s = {}
+    pd_ = run(["squeue", "-h", "-p", queue, "-t", "PD", "-o", "%i"], errors=errors)
+    rn = run(["squeue", "-h", "-p", queue, "-t", "R", "-o", "%i"], errors=errors)
+    s["queue_pend"] = len(pd_.splitlines()) if pd_ is not None else None
+    s["queue_run"] = len(rn.splitlines()) if rn is not None else None
+    own = run(["squeue", "-h", "-u", user, "-o", "%T %P"], errors=errors) or ""
+    rows = [ln.split() for ln in own.splitlines() if len(ln.split()) >= 2]
+    s["own_run_q"] = sum(1 for st, p in rows if st == "RUNNING" and p == queue)
+    s["own_pend_q"] = sum(1 for st, p in rows if st == "PENDING" and p == queue)
+    s["own_run_all"] = sum(1 for st, _ in rows if st == "RUNNING")
+    s["own_pend_all"] = sum(1 for st, _ in rows if st == "PENDING")
+    nodes = run(["sinfo", "-h", "-p", queue, "-o", "%t %D"], errors=errors) or ""
+    s["node_states"] = {p[0]: to_int(p[1]) for p in (ln.split() for ln in nodes.splitlines()) if len(p) == 2}
+    fs = run(["sshare", "-h", "-P", "-U", "-u", user, "-o", "Account,User,FairShare"], errors=errors) or ""
+    for ln in fs.splitlines():
+        p = ln.split("|")
+        if len(p) == 3 and p[1] == user:
+            s["fairshare_priority"] = p[2]
+    return s
+
+
+def take_snapshot(queue, req, out_dir, job_id=None):
+    """Never raises. Returns the snapshot dict and appends it to out_dir/snapshots.jsonl."""
+    errors = []
+    snap = {"kind": "snapshot", "ts": int(time.time()), "queue": queue, "errors": errors}
+    if job_id:
+        snap["job_id"] = job_id
+    try:
+        user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+        sched = scheduler()
+        snap["scheduler"] = sched
+        if not queue:
+            errors.append("no queue given")
+        elif sched == "lsf":
+            snap.update(snapshot_lsf(queue, req, errors, user))
+        elif sched == "slurm":
+            snap.update(snapshot_slurm(queue, req, errors, user))
+        else:
+            errors.append("no scheduler commands on PATH")
+    except Exception as e:  # never fail the caller
+        errors.append(f"snapshot: {type(e).__name__}: {e}")
+    append(out_dir, "snapshots.jsonl", snap)
+    return snap
+
+
+def append(out_dir, name, rec):
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, name), "a") as fh:
+            fh.write(json.dumps(rec, sort_keys=True) + "\n")
+    except OSError as e:
+        print(f"pendlog: could not write {name}: {e}", file=sys.stderr)
+
+
+def read_jsonl(path):
+    out = []
+    try:
+        with open(path) as fh:
+            for ln in fh:
+                try:
+                    out.append(json.loads(ln))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return out
+
+
+# ---------------------------------------------------------------- subcommands
+def cmd_snapshot(a):
+    req = parse_request(shlex.split(a.hosts_from_request or ""))
+    req["queue"] = a.queue
+    take_snapshot(a.queue, req, a.out)
+    return 0
+
+
+def cmd_submit(a):
+    cmd = list(a.command)
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        print("pendlog submit: give the command after --", file=sys.stderr)
+        return 2
+    stdin_text = sys.stdin.read() if a.stdin_script else None
+    try:
+        # #BSUB lines first: options on the command line override them, as in bsub
+        req = parse_request(cmd[:1] + bsub_lines(stdin_text or "") + cmd[1:])
+    except Exception as e:
+        req = {"parse_error": str(e)}
+    try:
+        snap = take_snapshot(req.get("queue"), req, a.out)
+    except Exception as e:
+        snap = {"errors": [str(e)]}
+    ts = int(time.time())
+    try:
+        p = subprocess.run(cmd, input=stdin_text, capture_output=True, text=True)
+        out, err, rc = p.stdout, p.stderr, p.returncode
+    except OSError as e:
+        out, err, rc = "", f"pendlog: could not run {cmd[0]}: {e}\n", 127
+    sys.stdout.write(out)
+    sys.stderr.write(err)
+    sys.stdout.flush()
+    m = re.search(r"Job <(\d+)>", out) or re.search(r"Submitted batch job (\d+)", out)
+    try:
+        append(a.out, "jobs.jsonl", {
+            "kind": "submit", "ts": ts, "job_id": m.group(1) if m else None, "rc": rc,
+            "request_args": cmd + (["<stdin>"] if stdin_text else []), "request": req,
+            "snapshot_ts": snap.get("ts"), "scheduler": snap.get("scheduler"),
+            "submit_output": (out + err).strip()[:500]})
+    except Exception as e:
+        print(f"pendlog: log failed: {e}", file=sys.stderr)
+    return rc
+
+
+def lsf_status(job_ids, errors):
+    """bjobs -o -json for the ids -> {job_id: observation}. Purged ids are missing."""
+    out = run(["bjobs", "-o", "jobid jobindex stat submit_time start_time pend_time pend_reason", "-json",
+               *job_ids], errors=errors)
+    obs = {}
+    if not out:
+        return obs
+    try:
+        recs = json.loads(out).get("RECORDS", [])
+    except ValueError:
+        errors.append("bjobs -json: unparsable output")
+        return obs
+    for r in recs:
+        jid = str(r.get("JOBID", ""))
+        if not jid or r.get("ERROR"):
+            continue
+        stat = r.get("STAT", "")
+        start = (r.get("START_TIME") or "").strip()
+        started = bool(start and start != "-") or stat in RUN_STATES
+        pend = to_int(r.get("PEND_TIME"))
+        o = obs.setdefault(jid, {"elements": 0, "started": False, "stats": [], "pend_s": None,
+                                 "pend_reason": "", "start_time_raw": "", "source": "bjobs"})
+        o["elements"] += 1
+        o["stats"].append(stat)
+        if started:
+            # array start: the first element to start, as in the study
+            if not o["started"] or (pend is not None and (o["pend_s"] is None or pend < o["pend_s"])):
+                o["pend_s"], o["start_time_raw"] = pend, start
+            o["started"] = True
+        else:
+            if not o["started"] and pend is not None:
+                o["pend_s"] = max(o["pend_s"] or 0, pend)
+            if r.get("PEND_REASON"):
+                o["pend_reason"] = " ".join(str(r["PEND_REASON"]).split())[:300]
+    return obs
+
+
+def lsf_bhist(job_id, errors):
+    out = run(["bhist", "-n", "10", "-l", job_id], errors=errors)
+    if not out:
+        return None
+    flat = " ".join(out.split())
+    m = re.search(r"PEND\s+PSUSP\s+RUN\s+USUSP\s+SSUSP\s+UNKWN\s+TOTAL\s+(\d+)\s+(\d+)\s+(\d+)", flat)
+    if not m:
+        return None
+    pend, run_s = int(m.group(1)), int(m.group(3))
+    started = run_s > 0 or "Started on" in flat or "Dispatched" in flat
+    return {"elements": 1, "started": started, "stats": ["DONE" if "Done successfully" in flat else "EXIT"],
+            "pend_s": pend, "pend_reason": "", "start_time_raw": "", "source": "bhist"}
+
+
+def slurm_status(job_ids, errors):
+    out = run(["sacct", "-n", "-X", "-P", "-j", ",".join(job_ids), "-o", "JobIDRaw,State,Submit,Start,Reason"],
+              errors=errors)
+    obs = {}
+    for ln in (out or "").splitlines():
+        p = ln.split("|")
+        if len(p) < 5:
+            continue
+        jid = p[0].split("_")[0]
+        started = p[3] not in ("", "Unknown", "None")
+        pend = None
+        try:
+            t0 = time.mktime(time.strptime(p[2], "%Y-%m-%dT%H:%M:%S"))
+            t1 = time.mktime(time.strptime(p[3], "%Y-%m-%dT%H:%M:%S")) if started else time.time()
+            pend = int(t1 - t0)
+        except ValueError:
+            pass
+        obs[jid] = {"elements": 1, "started": started, "stats": [p[1].split()[0]], "pend_s": pend,
+                    "pend_reason": "" if started else p[4], "start_time_raw": p[3], "source": "sacct"}
+    return obs
+
+
+def job_events(out_dir):
+    submits, last = {}, {}
+    for r in read_jsonl(os.path.join(out_dir, "jobs.jsonl")):
+        jid = r.get("job_id")
+        if not jid:
+            continue
+        if r.get("kind") == "submit":
+            submits[jid] = r
+        elif r.get("kind") == "started":
+            last.setdefault(jid, []).append(r)
+    return submits, last
+
+
+def cmd_started(a):
+    submits, seen = job_events(a.out)
+    now = int(time.time())
+    todo = [j for j, s in submits.items()
+            if s.get("rc") == 0 and now - s.get("ts", 0) <= a.since * 3600
+            and not any(o.get("final") for o in seen.get(j, []))]
+    if not todo:
+        print("pendlog started: no logged jobs waiting for a start")
+        return 0
+    errors = []
+    sched = scheduler()
+    if sched == "slurm":
+        obs = slurm_status(todo, errors)
+    else:
+        obs = lsf_status(todo, errors)
+        for j in todo:
+            if j not in obs:
+                h = lsf_bhist(j, errors)
+                if h:
+                    obs[j] = h
+    n_started = 0
+    for j in todo:
+        o = obs.get(j)
+        rec = {"kind": "started", "job_id": j, "ts": now}
+        if o is None:
+            rec.update({"final": False, "error": "not found by bjobs or bhist"})
+        else:
+            terminal = all(s in ("DONE", "EXIT", "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT") for s in o["stats"])
+            pend = o["pend_s"]
+            if pend is None and not o["started"]:
+                pend = now - submits[j].get("ts", now)
+            rec.update({"started": o["started"], "final": o["started"] or terminal, "stat": ",".join(sorted(set(o["stats"]))),
+                        "pend_s": pend, "pend_reason": o["pend_reason"], "start_time_raw": o["start_time_raw"],
+                        "elements": o["elements"], "source": o["source"]})
+            n_started += o["started"]
+        if errors:
+            rec["errors"] = errors[:5]
+        append(a.out, "jobs.jsonl", rec)
+    print(f"pendlog started: checked {len(todo)} jobs, {n_started} started")
+    return 0
+
+
+EXPORT_COLS = ["job_id", "submit_ts", "submit_utc", "queue", "cores", "mem_mb", "gpu_num", "gmem_gb", "gmodel",
+               "pin", "j_exclusive", "array_size", "host_incl", "host_excl", "runlimit", "request",
+               "snap_queue_pend", "snap_queue_run", "snap_own_run_q", "snap_own_pend_q", "snap_hosts_fit",
+               "snap_hosts_total", "snap_fairshare_priority", "snap_errors", "started", "pend_s",
+               "pend_censored", "last_stat", "pend_reason", "last_checked_ts"]
+
+
+def cmd_export(a):
+    submits, seen = job_events(a.out)
+    snaps = {s.get("ts"): s for s in read_jsonl(os.path.join(a.out, "snapshots.jsonl"))}
+    w = csv.DictWriter(sys.stdout, fieldnames=EXPORT_COLS, lineterminator="\n")
+    w.writeheader()
+    for jid, s in sorted(submits.items(), key=lambda kv: kv[1].get("ts", 0)):
+        if s.get("rc") != 0:
+            continue
+        req = s.get("request") or {}
+        snap = snaps.get(s.get("snapshot_ts")) or {}
+        obs = seen.get(jid, [])
+        st = next((o for o in obs if o.get("started")), None)
+        last = obs[-1] if obs else {}
+        reason = next((o.get("pend_reason") for o in reversed(obs) if o.get("pend_reason")), "")
+        pend = st.get("pend_s") if st else last.get("pend_s")
+        w.writerow({
+            "job_id": jid, "submit_ts": s.get("ts"),
+            "submit_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(s.get("ts", 0))),
+            "queue": req.get("queue"), "cores": req.get("cores"), "mem_mb": req.get("mem_mb"),
+            "gpu_num": req.get("gpu_num"), "gmem_gb": req.get("gmem_gb"), "gmodel": req.get("gmodel"),
+            "pin": int(bool(req.get("pin"))), "j_exclusive": int(bool(req.get("j_exclusive"))),
+            "array_size": req.get("array_size"), "host_incl": " ".join(req.get("host_incl") or []),
+            "host_excl": " ".join(req.get("host_excl") or []), "runlimit": req.get("runlimit"),
+            "request": shlex.join(s.get("request_args") or []),
+            "snap_queue_pend": snap.get("queue_pend"), "snap_queue_run": snap.get("queue_run"),
+            "snap_own_run_q": snap.get("own_run_q"), "snap_own_pend_q": snap.get("own_pend_q"),
+            "snap_hosts_fit": snap.get("hosts_fit"), "snap_hosts_total": snap.get("hosts_total"),
+            "snap_fairshare_priority": snap.get("fairshare_priority"),
+            "snap_errors": "; ".join(snap.get("errors") or []),
+            "started": int(bool(st)), "pend_s": pend, "pend_censored": int(not st and pend is not None),
+            "last_stat": last.get("stat", ""), "pend_reason": reason, "last_checked_ts": last.get("ts", "")})
+    return 0
+
+
+def main(argv=None):
+    global TIMEOUT
+    ap = argparse.ArgumentParser(prog="pendlog", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--timeout", type=int, default=TIMEOUT, help="seconds per scheduler command (default 20)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("snapshot")
+    p.add_argument("--queue", required=True)
+    p.add_argument("--hosts-from-request", default="")
+    p.add_argument("--out", required=True)
+    p = sub.add_parser("submit")
+    p.add_argument("--out", required=True)
+    p.add_argument("--stdin-script", action="store_true")
+    p.add_argument("command", nargs=argparse.REMAINDER)
+    p = sub.add_parser("started")
+    p.add_argument("--out", required=True)
+    p.add_argument("--since", type=float, default=72, help="hours back to look (default 72)")
+    p = sub.add_parser("export")
+    p.add_argument("--out", required=True)
+    a = ap.parse_args(argv)
+    TIMEOUT = a.timeout
+    if a.cmd == "snapshot":
+        try:
+            return cmd_snapshot(a)
+        except Exception as e:  # never fail the caller
+            print(f"pendlog snapshot: {e}", file=sys.stderr)
+            return 0
+    return {"submit": cmd_submit, "started": cmd_started, "export": cmd_export}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

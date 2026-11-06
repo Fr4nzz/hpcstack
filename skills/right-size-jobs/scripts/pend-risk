@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""pend-risk: how often did recent jobs like this one wait over 1 h? A risk lookup, not a forecast.
+
+UNTESTED on a real cluster: tested only on synthetic histories and fake bhosts (tests/test_pendlog.py).
+
+Usage:
+  pend-risk --history jobs.csv --request "<bsub args>" [--queue Q] [--weeks 4] [--gmem-threshold 32]
+            [--hosts-snapshot DIR/snapshots.jsonl | --no-live] [--now EPOCH]
+
+--history   `pendlog export` output, or an LSF accounting CSV with the columns job_id, array_idx, queue,
+            status, submit_ts, start_ts, end_ts, pend_s, gpu_gmem_mb, gpu_gmodel, hname_rule (others ignored).
+            Arrays count once, at their first element to start. Jobs killed while pending count as waits
+            over 1 h only if they had already waited that long.
+--request   the bsub options, e.g. "-q gpu -n 4 -M 16000 -gpu 'num=1:gmem=40G'".
+
+Similar jobs: same queue, same GPU-memory class (above --gmem-threshold GiB, or at or below it / no GPU
+memory), same pin (a GPU model pin or a host list: yes/no), submitted in the last --weeks weeks.
+Below 20 similar jobs it says so. Live host count: from --hosts-snapshot (last line), or from `bhosts`
+if it is on PATH (skip with --no-live).
+
+Why no ETA: on one user's 10,490 LSF jobs, no model predicted waits over 1 h on a GPU queue (AUC about
+0.48), because cluster-wide load drives them and accounting does not keep it. The one robust signal was a
+GPU-memory request above the smallest large-GPU class (+28 points in the chance of waiting over 1 h).
+"""
+import argparse
+import csv
+import importlib.machinery
+import importlib.util
+import json
+import os
+import shlex
+import shutil
+import statistics
+import sys
+import time
+
+sys.dont_write_bytecode = True
+_here = os.path.dirname(os.path.abspath(__file__))
+_loader = importlib.machinery.SourceFileLoader("pendlog", os.path.join(_here, "pendlog"))
+_spec = importlib.util.spec_from_loader("pendlog", _loader)
+pendlog = importlib.util.module_from_spec(_spec)
+_loader.exec_module(pendlog)
+
+LONG_S = 3600
+MIN_N = 20
+
+
+def num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def load_history(path):
+    """-> list of {queue, ts, gmem_gb, pin, wait_s, started}."""
+    with open(path, newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    if not rows:
+        return []
+    cols = set(rows[0])
+    if {"pend_censored", "gmem_gb", "submit_ts"} <= cols:
+        out = []
+        for r in rows:
+            w = num(r.get("pend_s"))
+            if w is None:
+                continue
+            out.append({"queue": r.get("queue") or "", "ts": num(r.get("submit_ts")) or 0,
+                        "gmem_gb": num(r.get("gmem_gb")), "pin": str(r.get("pin")) in ("1", "True", "true"),
+                        "wait_s": w, "started": str(r.get("started")) == "1"})
+        return out
+    if {"gpu_gmem_mb", "pend_s", "submit_ts", "queue", "job_id"} <= cols:
+        return load_accounting(rows)
+    raise SystemExit(f"pend-risk: {path}: neither pendlog export nor accounting CSV columns")
+
+
+def load_accounting(rows):
+    now = time.time()
+    subs = {}
+    for r in rows:
+        if r.get("status") == "ZOMBI" or "interactive" in (r.get("queue") or ""):
+            continue
+        cmd = (r.get("command_head") or "").strip()
+        if cmd in ("bash", "bash -l", "/bin/bash", "/bin/bash -l"):
+            continue
+        arr = (num(r.get("array_idx")) or 0) > 0
+        key = (r.get("job_id"), r.get("submit_ts")) if arr else (r.get("job_id"), r.get("submit_ts"), r.get("array_idx"))
+        start, sub = num(r.get("start_ts")), num(r.get("submit_ts"))
+        if sub is None:
+            continue
+        started = bool(start and start > 0)
+        if started:
+            wait = num(r.get("pend_s"))
+            wait = start - sub if wait is None else wait
+        else:
+            wait = (num(r.get("end_ts")) or now) - sub
+        gm = num(r.get("gpu_gmem_mb"))
+        model = (r.get("gpu_gmodel") or "").strip()
+        pin = bool(model and model.upper() != "NVIDIA") or "==" in (r.get("hname_rule") or "")
+        rec = {"queue": r.get("queue") or "", "ts": sub, "gmem_gb": gm / 1024 if gm else None, "pin": pin,
+               "wait_s": wait, "started": started}
+        old = subs.get(key)
+        # array start: the first element to start; a started element beats a never-started one
+        if old is None or (rec["started"], -rec["wait_s"]) > (old["started"], -old["wait_s"]):
+            subs[key] = rec
+    return list(subs.values())
+
+
+def above(gmem, thr):
+    return gmem is not None and gmem > thr
+
+
+def summarize(jobs):
+    known = [j for j in jobs if j["started"] or j["wait_s"] > LONG_S]
+    long_ = sum(1 for j in known if j["wait_s"] > LONG_S)
+    med = statistics.median(j["wait_s"] for j in jobs) if jobs else None
+    return {"n": len(jobs), "known": len(known), "long": long_,
+            "pct": 100.0 * long_ / len(known) if known else None, "median_s": med}
+
+
+def fmt_wait(s):
+    if s is None:
+        return "n/a"
+    if s < 90:
+        return f"{s:.0f} s"
+    if s < 5400:
+        return f"{s / 60:.0f} min"
+    return f"{s / 3600:.1f} h"
+
+
+def live_hosts(req, snapshot_path, no_live):
+    if snapshot_path:
+        snaps = pendlog.read_jsonl(snapshot_path)
+        snaps = [s for s in snaps if "hosts_total" in s]
+        if snaps:
+            s = snaps[-1]
+            hosts = s.get("gpu_hosts") or []
+            fit = 0
+            for h in hosts:
+                gpus = [{"model": g[0], "mem_gb": g[1], "mrsv_gb": g[2], "njobs": g[3]} for g in h.get("gpus", [])]
+                slots = {"status": h.get("status"), "free": h.get("free_slots")}
+                fit += bool(pendlog.host_fits(req, h["host"], gpus, slots))
+            age = int(time.time() - s.get("ts", 0))
+            return fit, len(hosts), f"snapshot {fmt_wait(age)} old"
+        return None
+    if no_live or not shutil.which("bhosts"):
+        return None
+    errors = []
+    s = pendlog.snapshot_lsf(req.get("queue") or "", req, errors, os.environ.get("USER", ""))
+    if "hosts_total" not in s:
+        return None
+    return s["hosts_fit"], s["hosts_total"], "live bhosts"
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="pend-risk", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--history", required=True)
+    ap.add_argument("--request", required=True)
+    ap.add_argument("--queue")
+    ap.add_argument("--weeks", type=float, default=4)
+    ap.add_argument("--gmem-threshold", type=float, default=32, help="GiB (default 32)")
+    ap.add_argument("--hosts-snapshot")
+    ap.add_argument("--no-live", action="store_true")
+    ap.add_argument("--now", type=float, help="epoch seconds (default: now)")
+    a = ap.parse_args(argv)
+
+    req = pendlog.parse_request(shlex.split(a.request))
+    queue = a.queue or req.get("queue")
+    if not queue:
+        raise SystemExit("pend-risk: give --queue or -q in --request")
+    req["queue"] = queue
+    thr = a.gmem_threshold
+    now = a.now or time.time()
+    t0 = now - a.weeks * 7 * 86400
+    hist = [j for j in load_history(a.history) if j["queue"] == queue and t0 <= j["ts"] <= now]
+    hi = above(req.get("gmem_gb"), thr)
+    pin = bool(req.get("pin"))
+
+    def group(gmem_above, pinned):
+        return [j for j in hist if above(j["gmem_gb"], thr) == gmem_above and j["pin"] == pinned]
+
+    gm_txt = f"GPU memory {req['gmem_gb']:g}G" if req.get("gmem_gb") else "no GPU memory request"
+    cls = f"above {thr:g}G" if hi else f"at or below {thr:g}G"
+    weeks = f"{a.weeks:g} weeks"
+    print(f"Request: queue {queue}, {gm_txt} ({cls}), {'with' if pin else 'no'} model or host pin")
+    s = summarize(group(hi, pin))
+    if s["n"] == 0:
+        print(f"No similar jobs in the last {weeks}: too few similar jobs to say.")
+    elif s["n"] < MIN_N:
+        print(f"Of {s['n']} similar jobs in the last {weeks}, {s['long']} of {s['known']} waited over 1 h "
+              f"(median wait {fmt_wait(s['median_s'])}). Too few similar jobs to say (fewer than {MIN_N}).")
+    else:
+        print(f"Of {s['n']} similar jobs in the last {weeks}, {s['pct']:.0f} % waited over 1 h "
+              f"(median wait {fmt_wait(s['median_s'])}).")
+
+    hints = []
+    if s["n"] >= MIN_N and s["pct"] is not None:
+        alts = []
+        if hi:
+            alts.append((group(False, pin), f"jobs with GPU memory at or below {thr:g}G",
+                         f"If 1.3 x the measured GPU-memory peak fits under {thr:g}G (smaller batch, half "
+                         f"precision), ask for that. Never go below 1.3 x the measured peak."))
+        if pin:
+            alts.append((group(hi, False), "jobs without a model or host pin",
+                         "Drop the pin if the job runs on any GPU that meets the memory request."))
+        for jobs, label, advice in alts:
+            o = summarize(jobs)
+            if o["n"] >= MIN_N and o["pct"] is not None and s["pct"] - o["pct"] >= 10:
+                hints.append(f"Hint: {label} waited over 1 h in {o['pct']:.0f} % of cases in the same weeks "
+                             f"(n = {o['n']}). {advice}")
+    for h in hints:
+        print(h)
+
+    if req.get("gpu_num") or req.get("gmem_gb") or req.get("gmodel"):
+        lh = live_hosts(req, a.hosts_snapshot, a.no_live)
+        if lh:
+            fit, total, src = lh
+            print(f"Hosts that can take this shape right now: {fit} of {total} GPU hosts ({src}, approximate).")
+    print("This is the recent record for similar requests, not a start-time forecast.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
