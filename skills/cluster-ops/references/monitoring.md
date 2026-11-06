@@ -21,7 +21,7 @@ Good: one background watcher that polls every 60 s and exits on a terminal state
 
 ```bash
 # LSF. UNTIL=RUN before a long handoff. Over ssh, put the ssh command inside the timeout.
-J=1234; UNTIL=END; CAP=2700; PEND_S=1200   # run in the background with an explicit tool timeout >= CAP+180 s (e.g. 3000 s); foreground (600 s): CAP=420 PEND_S=300
+J=1234; UNTIL=END; CAP=2700; PEND_S=1200   # background: set the tool's own timeout parameter >= CAP+180 s (e.g. 3000 s), not only a shell timeout; foreground (600 s): CAP=420 PEND_S=300
 ts=$(date +%s); t0=${T0:-$ts}   # ts: this call (CAP). t0: first call (PEND_S); pass T0 on a re-run
 while :; do
   rc=0; r=$(timeout 60 bjobs -noheader -o stat "$J" 2>&1) || rc=$?; s=${r##*$'\n'}   # survives set -e
@@ -56,16 +56,20 @@ What the output means:
 - `DONE`, `EXIT`, or `GONE` (a confirmed "is not found": finished and purged) are news, not verdicts. Read
   `status.json`, the log and `bacct` (see "When it ends").
 - `PEND_LONG`: report the pending reason from `bjobs -p -l` (`lsf.md`, "Why pending"). If the request is
-  over-strict, fix it. Otherwise hand off anyway (state file and job file, with the pending reason sent to whoever must act) or
-  re-run the `UNTIL=RUN` loop and say so. Never leave a pending job with no handoff.
+  over-strict, fix it. Otherwise hand off (state file and job file, with the pending reason sent to whoever must
+  act). Re-run the loop only inside the same foreground call, never as a new background loop. Never leave a
+  pending job with no handoff.
 - Pending jobs submitted through `pendlog submit` (`right-size-jobs`): run `pendlog started --out DIR` every
   10 to 15 min, or from the wait loop, so their start, PEND and pending reason are logged.
 - `ZOMBI`: report once and read `bacct`. Don't re-run the loop on it.
 - `CAP_REACHED`: the loop hit its own limit before the job changed state. Not news about the job: hand off
-  (state file and job file) or run the loop again in a new tool call with the `T0=` value it printed. `PEND_S` is
+  (state file and job file for a watcher). Don't start another background loop: each restart is one more turn end,
+  and coordinators that relay turn ends then wake their parent each time. A foreground loop may continue in the
+  same turn with the `T0=` value it printed. `PEND_S` is
   below `CAP`, so a pending job always reaches `PEND_LONG` first.
 - `ERROR` (timeout, authentication or transport failure, or an empty reply) is not a job state. The job stays
-  tracked. Check authentication first (an expired certificate does not kill jobs), then run the loop again.
+  tracked. Check authentication first (an expired certificate does not kill jobs), then run the loop again once
+  (this retry is for a diagnosed query failure, not a re-arm).
 - A `status.json` or checkpoint that stopped advancing while the job is RUN means a helper died or the job
   hangs.
 
