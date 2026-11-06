@@ -31,11 +31,12 @@ For Nextflow, read `-with-trace` (`%cpu`, `peak_rss`, `realtime`). For GPUs, sam
 - **CPU efficiency** = CPU time / (wall time x cores). Below 0.5, the job asked for too many cores, or the
   tool's thread flag does not match `-n`. Fix the flag first, then set `-n` to the cores it really uses.
   A "2-thread" tool that uses 1.05 cores gets 1 core.
-- **Cores on a busy cluster**: set `-n` to the pilot's measured busy cores, rounded up, plus one (8.5 busy
-  cores: `-n 10`, not 16). Extra cores are waste either way. They lengthen the wait when the few hosts that fit
-  the GPU request have free GPUs but no free cores (jobs asking 12 to 16 cores while using 4 to 8.5 pended 13 to
-  29 min longer). Across many jobs, though, core count had no average effect on waits: GPU memory and model pins
-  matter more (see "Wait risk" below).
+- **GPU jobs with data-loader workers**: their busy cores swing with the input pipeline, so give one core of
+  headroom: the pilot's measured busy cores, rounded up, plus one (8.5 busy cores: `-n 10`, not 16). CPU-only
+  tools follow the rule above (1.05 cores used: `-n 1`). Extra cores are waste either way. They lengthen the
+  wait when the few hosts that fit the GPU request have free GPUs but no free cores (jobs asking 12 to 16 cores
+  while using 4 to 8.5 pended 13 to 29 min longer). Across many jobs, though, core count had no average effect
+  on waits, and GPU memory mattered far more (see "Wait risk" below).
 - **Memory**: `-M` is about 1.3 x measured peak, rounded up to the next 500 MB. Peak is what the scheduler
   counts (cgroup RSS), not page cache.
 - **Variable inputs**: fit peak against input size and scale the request per input, or retry with more
@@ -80,7 +81,8 @@ What the request does change is the risk:
   (smaller batch, half precision), but never below 1.3 x the measured GPU-memory peak.
 - **Cutting cores** showed no average effect. It helps only when LSF's pending reason says the fitting hosts
   are short of cores.
-- **Model or host pins** add risk.
+- **Model or host pins** shrink the set of eligible hosts. In the study a GPU-model pin was associated with
+  about +10 points of over-1-h risk, but from only 17 jobs and not significant. Drop a pin the job doesn't need.
 
 Submit through `scripts/pendlog submit --out DIR -- bsub ...` so the data grows, and schedule
 `scripts/pendlog started --out DIR` every 10 to 15 min while jobs pend. Before a wave, run
