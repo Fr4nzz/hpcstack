@@ -461,7 +461,20 @@ def is_interactive(cmd, req, flags=INTERACTIVE_FLAGS):
     """Interactive or blocking submit? Only scheduler options before the command count, not the payload."""
     if os.path.basename(cmd[0]) in ("srun", "salloc"):
         return True
-    return os.path.basename(cmd[0]) == "bsub" and any(x in flags for x in req.get("flags", []))
+    if os.path.basename(cmd[0]) != "bsub":
+        return False
+    if "flags" not in req:  # parse failed: scan the option prefix for the flags themselves
+        return any(x in flags for x in _prefix(cmd[1:]))
+    return any(x in flags for x in req["flags"])
+
+
+def _prefix(args):
+    out = []
+    for x in args:
+        if not x.startswith("-"):
+            break
+        out.append(x)
+    return out
 
 
 def cmd_submit(a):
@@ -523,13 +536,13 @@ def cmd_submit(a):
         sys.stderr.flush()
         for t in threads:
             t.start()
-        if stdin_bytes is not None:
-            try:
-                p.stdin.write(stdin_bytes)
-                p.stdin.close()
-            except BrokenPipeError:
-                pass
-        try:
+        try:  # covers script delivery too: a Ctrl-C while piping the script still logs the record
+            if stdin_bytes is not None:
+                try:
+                    p.stdin.write(stdin_bytes)
+                    p.stdin.close()
+                except BrokenPipeError:
+                    pass
             for t in threads:
                 t.join()
             rc = p.wait()
@@ -724,7 +737,8 @@ def cmd_export(a):
         snap = snaps.get(s.get("snapshot_id") or ("ts", s.get("snapshot_ts"))) or {}
         obs = seen.get(jid, [])
         st = next((o for o in obs if o.get("started")), None)
-        last = obs[-1] if obs else {}
+        # an outage or not-found record has no pend_s or stat: use the last record that does
+        last = next((o for o in reversed(obs) if o.get("pend_s") is not None or o.get("stat")), obs[-1] if obs else {})
         reason = next((o.get("pend_reason") for o in reversed(obs) if o.get("pend_reason")), "")
         pend = st.get("pend_s") if st else last.get("pend_s")
         w.writerow({

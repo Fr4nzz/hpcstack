@@ -540,3 +540,64 @@ def test_ctrl_c_during_piped_submit_logs(lsf):  # R2-O5
     assert p.wait(timeout=30) == 130
     rec = jsonl(lsf["out"] / "jobs.jsonl")[-1]
     assert (rec["rc"], rec["job_id"]) == (130, "4301")
+
+
+def _load_pendlog():
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("pendlog_mod", PENDLOG)
+    spec = importlib.util.spec_from_loader("pendlog_mod", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_export_keeps_pend_after_outage_record(lsf):  # R3-O1
+    submit(lsf, "bsub", "-q", "gpu", "x")
+    set_state(lsf, jobs={"4242": [{"JOBID": "4242", "STAT": "PEND", "START_TIME": "",
+                                   "PEND_TIME": "900", "PEND_REASON": ""}]})
+    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))
+    set_state(lsf, bjobs_fail=True, bhist_none=True)
+    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))  # last record is now the outage one
+    rows = list(csv.DictReader(io.StringIO(run(lsf, PENDLOG, "export", "--out", str(lsf["out"])).stdout)))
+    assert rows[0]["pend_s"] == "900" and rows[0]["last_stat"] == "PEND"
+
+
+def test_ctrl_c_while_piping_script_logs(lsf, monkeypatch):  # R3-S1 / R3-O2
+    mod = _load_pendlog()
+
+    class Pipe:
+        def write(self, b):
+            raise KeyboardInterrupt
+
+        def close(self):
+            pass
+
+    class FakeP:
+        def __init__(self, *a, **k):
+            self.stdin = Pipe()
+            self.stdout = io.BytesIO(b"Job <4500> is submitted to queue <gpu>.\n")
+            self.stderr = io.BytesIO(b"")
+
+        def wait(self):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(mod.subprocess, "Popen", FakeP)
+    monkeypatch.setattr(mod, "tee", lambda src, dst, buf: buf.append(src.read()))
+    monkeypatch.setattr(mod.sys, "stdin", type("S", (), {"buffer": io.BytesIO(b"#BSUB -q gpu\npython x.py\n"),
+                                                           "isatty": lambda self: False})())
+    monkeypatch.setenv("PATH", lsf["env"]["PATH"])
+    monkeypatch.setenv("FAKE_STATE", lsf["env"]["FAKE_STATE"])
+    rc = mod.main(["submit", "--stdin-script", "--out", str(lsf["out"]), "--", "bsub", "-K"])
+    assert rc == 130
+    rec = jsonl(lsf["out"] / "jobs.jsonl")[-1]
+    assert rec["kind"] == "submit" and rec["rc"] == 130
+
+
+def test_parse_error_still_detects_interactive():  # R3-O4
+    mod = _load_pendlog()
+    assert mod.is_interactive(["bsub", "-Is", "bash"], {"parse_error": "x"})
+    assert not mod.is_interactive(["bsub", "-q", "gpu", "python", "-I"], {"parse_error": "x"})
