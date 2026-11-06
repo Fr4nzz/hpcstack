@@ -65,6 +65,31 @@ bsub -q <gpu-queue> -n 4 -M 16000 -gpu "num=1" -W 8:00 -o q/worker.%J.out \
 - Each task checkpoints per unit, so a killed or slow worker redoes one task, not the wave. A task whose
   worker host is overloaded can be killed and requeued once, and the requeue is recorded.
 
+## Repurposable slot (UNTESTED on a cluster)
+
+When the queue is long, a running worker is worth more than a new submission. Tested on synthetic tasks only.
+
+```bash
+scripts/queue_worker.py add --queue q/ --id w04_full --est-min 240 \
+    --resume-cmd "python train.py --cfg full.yaml resume=last.pt" -- python train.py --cfg full.yaml
+scripts/queue_worker.py add --queue q/ --id w04_ablate --priority high --est-min 40 -- python train.py --cfg ablate.yaml
+scripts/queue_worker.py preempt --queue q/ --task w04_full --reason "ablation decides whether the next wave runs"
+```
+
+- Long trainings that may be displaced go in as worker tasks with a `--resume-cmd`, not as bare batch jobs.
+  A bare batch job cannot take new work, a worker can.
+- Prefer queueing into your running worker over a new submission when the queue is long. Preempt only with
+  a recorded reason that the new work is worth more.
+- `preempt` writes `q/preempt/<id>.json` and signals nothing. Within about 10 s the worker sends the task
+  `--preempt-signal` (default TERM), waits `--preempt-grace` (120 s), then KILLs it. The task is recorded as
+  `preempted`, logged in `q/preempt.log`, and re-queued ahead of other normal tasks with its `--resume-cmd`.
+  The high-priority task runs next in the same allocation.
+- The preempted run loses the work since its last checkpoint, for example up to one epoch when the trainer
+  resumes from its last-epoch checkpoint. Without `--resume-cmd` it restarts from scratch.
+- A task is preempted at most twice. `preempt` prints the worker's time left and warns when a high task's
+  `--est-min` does not fit. `bkill` or USR2 on the worker still stops everything.
+- Fair use: your own queue and jobs only, no idle allocations held, the idle exit stays on.
+
 ## Attribution
 
 When several ideas are stacked, find out which ones carried the gain before reporting. Ablate the final

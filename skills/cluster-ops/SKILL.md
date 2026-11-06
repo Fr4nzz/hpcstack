@@ -96,6 +96,8 @@ Before deleting data, see `storage-footprint`: the source data of a trained or d
 
 - `bkill`/`scancel` the exact confirmed job id, never a pattern, and only with the user's reason.
   Releasing your own idle interactive allocation counts as one.
+- To swap one of your own running trainings for more valuable work without re-queuing, use a worker task and
+  `queue_worker.py preempt` (`cluster-autoresearch`, "Repurposable slot") instead of `bkill` plus a new job.
 - Wait for `EXIT` before reusing its output paths, or write to a new versioned directory.
 - Never submit speculative duplicates "in case one pends".
 - Check the reply of every kill. With an expired login it can fail silently and the job keeps running.
