@@ -57,7 +57,7 @@ What the output means:
   `status.json`, the log and `bacct` (see "When it ends").
 - `PEND_LONG`: report the pending reason from `bjobs -p -l` (`lsf.md`, "Why pending"). If the request is
   over-strict, fix it. Otherwise hand off (state file and job file, with the pending reason sent to whoever must
-  act). Re-run the loop only inside the same foreground call, never as a new background loop. Never leave a
+  act). Re-run it only as a foreground loop in the same turn, never as a new background loop. Never leave a
   pending job with no handoff.
 - Pending jobs submitted through `pendlog submit` (`right-size-jobs`): run `pendlog started --out DIR` every
   10 to 15 min, or from the wait loop, so their start, PEND and pending reason are logged.
