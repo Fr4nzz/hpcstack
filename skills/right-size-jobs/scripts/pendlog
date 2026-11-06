@@ -20,14 +20,16 @@ submit    Takes a snapshot (or reuses one under 60 s old for the same queue and 
           stdout and stderr pass through byte for byte as they arrive. Options are read from the command
           line only. With --stdin-script, stdin is read, its #BSUB lines are parsed too, and it is passed on
           to bsub (for `pendlog submit --stdin-script -- bsub < job.sh`).
-          Interactive or blocking submits (bsub -I, -Is, -Ip, -IX, -K, and srun or salloc) are logged
-          first, without a job id, then pendlog replaces itself with the command (exec), so the terminal
-          belongs to the job. `started` cannot follow them.
+          Interactive or blocking submits (bsub -I, -Is, -Ip, -IX, -IS, -ISp, -ISs, -K among the options
+          before the command, and srun or salloc) are logged first, without a job id, then pendlog replaces
+          itself with the command (exec), so the terminal belongs to the job. `started` cannot follow them.
+          --stdin-script with -I* (or srun, salloc) exits 2, because those jobs need the terminal.
+          --stdin-script with -K pipes the script as usual; Ctrl-C waits for bsub, logs rc 130, exits 130.
 started   For logged jobs with no start yet (submitted in the last --since hours, default 72), reads the
           state, start time, PEND seconds and pending reason with one
           `bjobs -o "jobid jobindex stat submit_time start_time pend_time pend_reason" -json` call, falling
-          back to `bhist -n 3 -l` for purged jobs (a job found by neither in 2 tries is marked
-          final, as unknown). Appends one line per job to DIR/jobs.jsonl. Schedule it
+          back to `bhist -n 3 -l` for purged jobs (a job that neither knows in 2 tries is marked
+          final, as unknown; a failed or timed-out command logs "scheduler unavailable" and is no try). Appends one line per job to DIR/jobs.jsonl. Schedule it
           every 10 to 15 min while jobs pend, or call it from a wait loop.
 export    One CSV row per logged job: the request, the snapshot at submit, PEND seconds and the last
           pending reason. Feed it to `pend-risk --history`.
@@ -53,7 +55,8 @@ TIMEOUT = 20
 DEADLINE = None  # epoch seconds; set by submit so the snapshot can't hold up the bsub
 SUBMIT_SNAPSHOT_BUDGET = 10
 SNAPSHOT_REUSE_S = 60
-INTERACTIVE_FLAGS = {"-I", "-Is", "-Ip", "-IX", "-K"}
+PTY_FLAGS = {"-I", "-Is", "-Ip", "-IX", "-IS", "-ISp", "-ISs"}  # need the terminal
+INTERACTIVE_FLAGS = PTY_FLAGS | {"-K"}  # -K blocks until the job ends
 UNIT_MB = {"": 1.0, "k": 1 / 1024, "m": 1.0, "g": 1024.0, "t": 1024.0 ** 2}
 RUN_STATES = {"RUN", "DONE", "USUSP", "SSUSP", "RUNNING", "COMPLETED", "SUSPENDED"}
 
@@ -97,6 +100,7 @@ BSUB_WITH_VAL = set("""
     -q -n -M -R -gpu -J -m -W -o -e -oo -eo -i -is -P -G -w -cwd -u -app -sla -g -E -Ep -L -k -b -We -env -data
     -Jd -outdir -a -ext -U -C -D -S -F -T -sp -Lp -mig -s -c -v -t -f -cn_mem -cn_cu -jsdl -jsdl_strict -hostfile
     -pack -alloc_flags -csm -smt -stage -network -nnodes -freq -ptl -rnc -eptl -clusters -wa -wt -Q -p
+    -notify -jobaff -rcacct -ln_slots -ln_mem -datachk -datagrp
 """.split())
 SLURM_SUBMIT = ("sbatch", "srun", "salloc")
 SLURM_WITH_VAL = {"-A", "-a", "-b", "-c", "-C", "-d", "-D", "-e", "-G", "-i", "-J", "-L", "-M", "-m", "-n", "-N",
@@ -112,7 +116,7 @@ def parse_request(args):
         args = args[1:]
     r = {"queue": None, "cores": None, "mem_mb": None, "gpu_num": None, "gmem_gb": None, "gmodel": "",
          "j_exclusive": False, "pin": False, "host_incl": [], "host_excl": [], "array_size": 1,
-         "runlimit": None, "resreq": []}
+         "runlimit": None, "resreq": [], "flags": []}
     with_val = SLURM_WITH_VAL if slurm else BSUB_WITH_VAL
     i = 0
     while i < len(args):
@@ -125,6 +129,8 @@ def parse_request(args):
             i += 1
         elif not a.startswith("-"):
             break  # the command starts here
+        else:
+            r["flags"].append(a)  # an option without a value, before the command
         if (a == "-q" and not slurm) or (a in ("-p", "--partition") and slurm):
             r["queue"] = val
         elif (a == "-n" and not slurm) or (a in ("-c", "--cpus-per-task") and slurm):
@@ -451,10 +457,11 @@ def job_id_from(out):
     return m.group(1) if m else None
 
 
-def is_interactive(cmd):
+def is_interactive(cmd, req, flags=INTERACTIVE_FLAGS):
+    """Interactive or blocking submit? Only scheduler options before the command count, not the payload."""
     if os.path.basename(cmd[0]) in ("srun", "salloc"):
         return True
-    return os.path.basename(cmd[0]) == "bsub" and any(x in INTERACTIVE_FLAGS for x in cmd[1:])
+    return os.path.basename(cmd[0]) == "bsub" and any(x in flags for x in req.get("flags", []))
 
 
 def cmd_submit(a):
@@ -476,6 +483,11 @@ def cmd_submit(a):
         req = parse_request(cmd[:1] + bsub_lines(stdin_text or "") + cmd[1:])
     except Exception as e:
         req = {"parse_error": str(e)}
+    if stdin_bytes is not None and is_interactive(cmd, req, PTY_FLAGS):
+        print("pendlog submit: an interactive job (-I*, srun, salloc) needs the terminal, so --stdin-script "
+              "can't be used. Put the options on the command line: pendlog submit --out DIR -- bsub -Is ...",
+              file=sys.stderr)
+        return 2
     snap = None
     try:
         snap = recent_snapshot(a.out, req.get("queue"), req)
@@ -491,7 +503,7 @@ def cmd_submit(a):
     rec = {"kind": "submit", "ts": int(time.time()), "job_id": None, "rc": None,
            "request_args": cmd + (["<stdin>"] if stdin_bytes is not None else []), "request": req,
            "snapshot_id": snap.get("snap_id"), "snapshot_ts": snap.get("ts"), "scheduler": snap.get("scheduler")}
-    if is_interactive(cmd) and stdin_bytes is None:
+    if stdin_bytes is None and is_interactive(cmd, req):
         rec["interactive"] = True
         append(a.out, "jobs.jsonl", rec)
         sys.stdout.flush()
@@ -517,9 +529,19 @@ def cmd_submit(a):
                 p.stdin.close()
             except BrokenPipeError:
                 pass
-        for t in threads:
-            t.join()
-        rc = p.wait()
+        try:
+            for t in threads:
+                t.join()
+            rc = p.wait()
+        except KeyboardInterrupt:  # Ctrl-C reaches bsub too: let it finish, then log
+            try:
+                p.wait()
+            except KeyboardInterrupt:
+                p.kill()
+                p.wait()
+            for t in threads:
+                t.join(timeout=5)
+            rc = 130
     except OSError as e:
         print(f"pendlog: could not run {cmd[0]}: {e}", file=sys.stderr)
         rc = 127
@@ -536,17 +558,17 @@ def cmd_submit(a):
 
 
 def lsf_status(job_ids, errors):
-    """bjobs -o -json for the ids -> {job_id: observation}. Purged ids are missing."""
+    """bjobs -o -json for the ids -> ({job_id: observation}, answered). Purged ids are missing."""
     out = run(["bjobs", "-o", "jobid jobindex stat submit_time start_time pend_time pend_reason", "-json",
                *job_ids], errors=errors)
     obs = {}
     if not out:
-        return obs
+        return obs, False
     try:
         recs = json.loads(out).get("RECORDS", [])
-    except ValueError:
+    except (ValueError, AttributeError):
         errors.append("bjobs -json: unparsable output")
-        return obs
+        return obs, False
     for r in recs:
         jid = str(r.get("JOBID", ""))
         if not jid or r.get("ERROR"):
@@ -569,27 +591,36 @@ def lsf_status(job_ids, errors):
                 o["pend_s"] = max(o["pend_s"] or 0, pend)
             if r.get("PEND_REASON"):
                 o["pend_reason"] = " ".join(str(r["PEND_REASON"]).split())[:300]
-    return obs
+    return obs, True
 
 
 def lsf_bhist(job_id, errors):
-    out = run(["bhist", "-n", "3", "-l", job_id], errors=errors)
-    if not out:
-        return None
-    flat = " ".join(out.split())
+    """-> (observation or None, answered). Answered: bhist ran and either found the job or said it has none."""
+    try:
+        p = subprocess.run(["bhist", "-n", "3", "-l", job_id], capture_output=True, text=True,
+                           timeout=TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        errors.append(f"bhist: {type(e).__name__}")
+        return None, False
+    flat = " ".join((p.stdout + " " + p.stderr).split())
     m = re.search(r"PEND\s+PSUSP\s+RUN\s+USUSP\s+SSUSP\s+UNKWN\s+TOTAL\s+(\d+)\s+(\d+)\s+(\d+)", flat)
     if not m:
-        return None
+        if "No matching job" in flat:
+            return None, True
+        errors.append(f"bhist: rc={p.returncode} {p.stderr.strip()[:200]}")
+        return None, False
     pend, run_s = int(m.group(1)), int(m.group(3))
     started = run_s > 0 or "Started on" in flat or "Dispatched" in flat
     return {"elements": 1, "started": started, "stats": ["DONE" if "Done successfully" in flat else "EXIT"],
-            "pend_s": pend, "pend_reason": "", "start_time_raw": "", "source": "bhist"}
+            "pend_s": pend, "pend_reason": "", "start_time_raw": "", "source": "bhist"}, True
 
 
 def slurm_status(job_ids, errors):
     out = run(["sacct", "-n", "-X", "-P", "-j", ",".join(job_ids), "-o", "JobIDRaw,State,Submit,Start,Reason"],
               errors=errors)
     obs = {}
+    if out is None:
+        return obs, False
     for ln in (out or "").splitlines():
         p = ln.split("|")
         if len(p) < 5:
@@ -605,7 +636,7 @@ def slurm_status(job_ids, errors):
             pass
         obs[jid] = {"elements": 1, "started": started, "stats": [p[1].split()[0]], "pend_s": pend,
                     "pend_reason": "" if started else p[4], "start_time_raw": p[3], "source": "sacct"}
-    return obs
+    return obs, True
 
 
 def job_events(out_dir):
@@ -632,21 +663,28 @@ def cmd_started(a):
         return 0
     errors = []
     sched = scheduler()
+    answered = {}  # job -> did the scheduler answer about it (found, or said it doesn't know it)
     if sched == "slurm":
-        obs = slurm_status(todo, errors)
+        obs, ok = slurm_status(todo, errors)
+        answered = {j: ok for j in todo}
     else:
-        obs = lsf_status(todo, errors)
+        obs, ok = lsf_status(todo, errors)
         for j in todo:
-            if j not in obs:
-                h = lsf_bhist(j, errors)
+            answered[j] = ok
+            if ok and j not in obs:
+                h, answered[j] = lsf_bhist(j, errors)
                 if h:
                     obs[j] = h
     n_started = 0
     for j in todo:
         o = obs.get(j)
         rec = {"kind": "started", "job_id": j, "ts": now}
-        if o is None:
-            tries = 1 + sum(1 for x in seen.get(j, []) if x.get("error"))
+        prev = max((x.get("tries", 0) for x in seen.get(j, [])), default=0)
+        if o is None and not answered.get(j):
+            # an outage or timeout is not evidence that the job is gone: don't count a try
+            rec.update({"final": False, "tries": prev, "error": "scheduler unavailable"})
+        elif o is None:
+            tries = prev + 1
             rec.update({"final": tries >= 2, "unknown": tries >= 2, "tries": tries,
                         "error": "not found by bjobs or bhist"})
         else:

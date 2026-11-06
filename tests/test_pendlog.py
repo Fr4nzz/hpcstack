@@ -50,6 +50,9 @@ else:
     "bjobs": r'''
 import json, os, sys
 st = json.load(open(os.environ["FAKE_STATE"]))
+if st.get("bjobs_fail") and "-u" not in sys.argv:
+    sys.stderr.write("LSF is down. Please wait ...\n")
+    sys.exit(255)
 if "-u" in sys.argv:
     print("RUN gpu"); print("PEND gpu"); print("PEND normal")
     sys.exit(0)
@@ -66,7 +69,8 @@ print(json.dumps({"COMMAND": "bjobs", "JOBS": len(recs), "RECORDS": recs}))
 import json, os, sys
 open(os.environ["FAKE_STATE"] + ".bhist_args", "a").write(" ".join(sys.argv[1:]) + "\n")
 if json.load(open(os.environ["FAKE_STATE"])).get("bhist_none"):
-    sys.exit(0)
+    sys.stderr.write("No matching job found\n")
+    sys.exit(255)
 print("Job <%s>, User <u>, Project <default>, Command <x>" % sys.argv[-1])
 print("Summary of time in seconds spent in various states:")
 print("  PEND     PSUSP    RUN      USUSP    SSUSP    UNKWN    TOTAL")
@@ -80,7 +84,7 @@ import json, os, sys
 st = json.load(open(os.environ["FAKE_STATE"]))
 open(os.environ["FAKE_STATE"] + ".bsub_stdin", "w").write(sys.stdin.read() if not sys.stdin.isatty() else "")
 mode = st.get("bsub_mode")
-if "-Is" in sys.argv:
+if "-Is" in sys.argv or "-IS" in sys.argv:
     print(f"interactive pid={os.getpid()}")
     sys.exit(0)
 if mode == "bytes":
@@ -472,3 +476,67 @@ def test_risk_gate_counts_known_outcomes(lsf):  # S1
     assert "Of 26 similar jobs in the last 4 weeks, 0 of the 1 with a known outcome waited over 1 h" in out
     assert "median wait of those that started 2 min" in out and "too few similar jobs to say" in out.lower()
     assert "%" not in out
+
+
+# ---------------------------------------------------------------- review round 2 fixes
+def test_outage_does_not_close_job(lsf):  # R2-O1
+    submit(lsf, "bsub", "-q", "gpu", "x")
+    set_state(lsf, bjobs_fail=True, bhist_none=True)
+    for _ in range(2):
+        run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))
+    ev = [e for e in jsonl(lsf["out"] / "jobs.jsonl") if e["kind"] == "started"]
+    assert [(e["final"], e["tries"], e["error"]) for e in ev] == [(False, 0, "scheduler unavailable")] * 2
+    set_state(lsf, bjobs_fail=False, jobs={"4242": [{"JOBID": "4242", "STAT": "PEND", "START_TIME": "",
+                                                     "PEND_TIME": "900", "PEND_REASON": ""}]})
+    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))
+    last = jsonl(lsf["out"] / "jobs.jsonl")[-1]
+    assert last["pend_s"] == 900 and not last["final"]
+
+
+def test_payload_flags_are_not_interactive(lsf):  # R2-S1/R2-O2
+    for args in (["-q", "gpu", "python", "train.py", "-I"], ["-q", "normal", "grep", "-I", "x"]):
+        r = submit(lsf, "bsub", *args)
+        assert r.stdout == "Job <4242> is submitted to queue <gpu>.\n"
+        rec = jsonl(lsf["out"] / "jobs.jsonl")[-1]
+        assert "interactive" not in rec and rec["job_id"] == "4242"
+
+
+def test_capital_is_flags_exec(lsf):  # R2-O3
+    p = subprocess.Popen([sys.executable, PENDLOG, "submit", "--out", str(lsf["out"]), "--", "bsub", "-IS", "-q", "gpu",
+                          "bash"], env=lsf["env"], stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True)
+    out, _ = p.communicate(timeout=60)
+    assert out == f"interactive pid={p.pid}\n" and jsonl(lsf["out"] / "jobs.jsonl")[-1]["interactive"]
+
+
+def test_stdin_script_with_interactive(lsf):  # R2-S2
+    r = submit(lsf, "bsub", "-Is", "-q", "gpu", stdin="#BSUB -n 1\nbash\n", check=False)
+    assert r.returncode == 0  # without --stdin-script stdin is the user's: exec as usual
+    for cmd, script in ((["bsub", "-Is"], "#BSUB -q gpu\nbash\n"), (["bsub"], "#BSUB -Is\n#BSUB -q gpu\nbash\n")):
+        r = run(lsf, PENDLOG, "submit", "--stdin-script", "--out", str(lsf["out"]), "--", *cmd, stdin=script,
+                check=False)
+        assert r.returncode == 2 and "needs the terminal" in r.stderr
+    n = len(jsonl(lsf["out"] / "jobs.jsonl"))
+    r = run(lsf, PENDLOG, "submit", "--stdin-script", "--out", str(lsf["out"]), "--", "bsub", "-K",
+            stdin="#BSUB -q gpu\npython x.py\n")
+    rec = jsonl(lsf["out"] / "jobs.jsonl")
+    assert len(rec) == n + 1 and rec[-1]["job_id"] == "4242" and "interactive" not in rec[-1]
+
+
+def test_more_value_options(lsf):  # R2-O4
+    submit(lsf, "bsub", "-notify", "exit", "-ln_slots", "2", "-datagrp", "g", "-q", "gpu", "-gpu", "num=1:gmem=40G", "x")
+    req = jsonl(lsf["out"] / "jobs.jsonl")[-1]["request"]
+    assert (req["queue"], req["gmem_gb"]) == ("gpu", 40)
+
+
+def test_ctrl_c_during_piped_submit_logs(lsf):  # R2-O5
+    import signal
+    set_state(lsf, bsub_mode="slow")
+    p = subprocess.Popen([sys.executable, PENDLOG, "submit", "--stdin-script", "--out", str(lsf["out"]), "--",
+                          "bsub", "-K"], env=lsf["env"], stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+    p.stdin.write(b"#BSUB -q gpu\npython x.py\n")
+    p.stdin.close()
+    assert p.stdout.readline().startswith(b"Job <4301>")
+    os.kill(p.pid, signal.SIGINT)
+    assert p.wait(timeout=30) == 130
+    rec = jsonl(lsf["out"] / "jobs.jsonl")[-1]
+    assert (rec["rc"], rec["job_id"]) == (130, "4301")
