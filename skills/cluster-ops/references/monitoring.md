@@ -22,7 +22,7 @@ Good: one background watcher that polls every 60 s and exits on a terminal state
 ```bash
 # LSF. UNTIL=RUN before a long handoff. Over ssh, put the ssh command inside the timeout.
 J=1234; UNTIL=END; CAP=1500; PEND_S=1200   # background slot (1800 s): CAP + 60 s sleep + 60 s query < slot; foreground (600 s): CAP=420 PEND_S=300
-t0=${T0:-$(date +%s)}   # pass T0 on a re-run so the pending clock keeps counting
+ts=$(date +%s); t0=${T0:-$ts}   # ts: this call (CAP). t0: first call (PEND_S); pass T0 on a re-run
 while :; do
   rc=0; r=$(timeout 60 bjobs -noheader -o stat "$J" 2>&1) || rc=$?; s=${r##*$'\n'}   # survives set -e
   case $s in
@@ -31,22 +31,22 @@ while :; do
     PEND) (( $(date +%s) - t0 > PEND_S )) && { echo PEND_LONG; break; } ;;
     UNKWN|PSUSP|USUSP|SSUSP|PROV|WAIT) ;;   # UNKWN = lost node contact, not EXIT: keep polling
     ZOMBI) echo ZOMBI; break ;;   # a kill LSF could not confirm: report once, read bacct
-    *) if [[ $r == *"is not found"* ]]; then echo GONE; else echo "ERROR rc=$rc: $r"; fi; break ;;
+    *) if [[ $r == *"is not found"* ]]; then echo GONE; else echo "ERROR rc=$rc T0=$t0: $r"; fi; break ;;
   esac
-  (( $(date +%s) - t0 > CAP )) && { echo "CAP_REACHED last=$s"; break; }
+  (( $(date +%s) - ts > CAP )) && { echo "CAP_REACHED last=$s T0=$t0"; break; }
   sleep 60
 done
 # SLURM, same shape
-J=1234; UNTIL=END; CAP=1500; PEND_S=1200; t0=${T0:-$(date +%s)}
+J=1234; UNTIL=END; CAP=1500; PEND_S=1200; ts=$(date +%s); t0=${T0:-$ts}
 while :; do
   rc=0; r=$(timeout 60 sacct -n -X -P -j "$J" -o State 2>&1) || rc=$?; s=${r%%$'\n'*}; s=${s%% *}
   case $s in
     COMPLETED|FAILED|CANCELLED|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL) echo "$s"; break ;;
     RUNNING) [[ $UNTIL == RUN ]] && { echo RUN; break; } ;;
     PENDING) (( $(date +%s) - t0 > PEND_S )) && { echo PEND_LONG; break; } ;;
-    *) echo "ERROR rc=$rc: $r"; break ;;   # empty reply or error is not a state
+    *) echo "ERROR rc=$rc T0=$t0: $r"; break ;;   # empty reply or error is not a state
   esac
-  (( $(date +%s) - t0 > CAP )) && { echo "CAP_REACHED last=$s"; break; }
+  (( $(date +%s) - ts > CAP )) && { echo "CAP_REACHED last=$s T0=$t0"; break; }
   sleep 60
 done
 ```
@@ -60,7 +60,7 @@ What the output means:
   re-run the `UNTIL=RUN` loop and say so. Never leave a pending job with no handoff.
 - `ZOMBI`: report once and read `bacct`. Don't re-run the loop on it.
 - `CAP_REACHED`: the loop hit its own limit before the job changed state. Not news about the job: hand off
-  (state file and job file) or run the loop again in a new tool call with `T0=<the first t0>`. `PEND_S` is
+  (state file and job file) or run the loop again in a new tool call with the `T0=` value it printed. `PEND_S` is
   below `CAP`, so a pending job always reaches `PEND_LONG` first.
 - `ERROR` (timeout, authentication or transport failure, or an empty reply) is not a job state. The job stays
   tracked. Check authentication first (an expired certificate does not kill jobs), then run the loop again.
