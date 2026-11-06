@@ -21,6 +21,10 @@ Write `program.md` from `references/program-template.md`. It fixes:
   config or pipeline step). If a pinned hash changes, stop and report.
 - **Keep rule**: gain > max(2 x seed spread, a floor), measured over the same seeds as the incumbent, plus
   guard metrics that must not drop and a simplicity rule (equal score with less code or compute wins).
+- **Seeds must really differ.** Some frameworks seed the data loader with a constant, and a seed flag then
+  changes only newly built layers: two fine-tunes from one checkpoint train identically and the seed spread is
+  zero. Check that seed 1's first logged losses differ from seed 0's before submitting more seeds. Two
+  identical "replicates" once cost 2 GPU-h and left a result with one effective seed.
 - **Budget**: total GPU-hours or core-hours, a wall-clock end, and per-wave size. State the estimate:
   "8 runs x 0.5 GPU-h = 4 GPU-h per wave, at most 5 waves".
 - **Stop rule**: budget spent, wall-clock end reached, or k waves in a row without a keep (default k = 2).

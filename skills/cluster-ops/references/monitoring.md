@@ -65,7 +65,9 @@ What the output means:
 **Short waits (under about 1 h): wait inside one tool call** with the loop above, using your harness's
 background facility (a background command or monitor), or one foreground command within the tool timeout.
 Never a series of `sleep` tool calls or repeated short polls. Set the background tool's own timeout above the
-loop's cap: a loop capped at 90 min inside a 30 min background slot is killed at 30 min.
+loop's cap: a loop capped at 90 min inside a 30 min background slot is killed at 30 min. The loop's real
+length is its cap plus one sleep step plus one query timeout. Keep that sum under the tool timeout: two loops
+that slept 600 s before checking a 2 h cap were killed before they reported.
 
 **Long waits (over about 1 h):** first run the loop with `UNTIL=RUN`, and hand off only a running job. A
 watcher that wakes on ended jobs does not wake on PEND, so a job still pending after 30 min is reported with
@@ -74,6 +76,14 @@ let a model-free watcher wake the agent on a state change. Prefer that to one wa
 jobs end early or late, and a fixed-time wake left one finished result unread for almost 4 h.
 Background commands in agent harnesses often time out near 2 h, and each wake after a prompt-cache expiry
 re-reads the whole context at full price.
+
+**Stragglers and long pends also need a wake.** A watcher that wakes only when jobs end stays silent while a
+job runs far too long or never starts. Record an expected runtime for each job. A job still RUN at about 2x its
+expected time, or 2x another run of the same step, is a straggler: check the host load (`lsload`, `bhosts`),
+start one copy that excludes that host, keep whichever finishes first and kill the other by exact id. One eval
+meant for 20 min ran 6.4 h on an overloaded host while three checks saw it "running". Likewise give a pending
+job a limit (for example 3 h): at the limit, re-read the pending reason and the hosts that can take it, then
+relax one thing or ask. One replicate pended 7.7 h with nobody looking.
 
 **A wait lives in one session.** After a login expiry, a network outage, a provider error, or a move of the
 agent to another account, thread or machine, its pending wait may be gone. Whoever made the change re-checks

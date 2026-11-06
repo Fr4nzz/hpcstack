@@ -53,7 +53,12 @@ For Nextflow, read `-with-trace` (`%cpu`, `peak_rss`, `realtime`). For GPUs, sam
   Retrying after a memory kill is the fallback, not the plan.
 - **Every resubmit is re-sized.** Reused job scripts and templates keep their old numbers. Before resubmitting
   or starting the next stage, apply the latest measured peak, cores and GPU memory. A template value 10x over
-  the measured peak (40 GB asked, 1.9 GB used) is a bug, and so is a margin of 3 %.
+  the measured peak (40 GB asked, 1.9 GB used) is a bug, and so is a margin of 3 %. Do it at submit, before
+  the first `bsub`, not after the job pends: two jobs pended 20 to 30 min on template sizes 4x too big.
+- **Count the hosts before a wave.** A GPU-memory floor that only the largest GPUs meet can leave a handful of
+  hosts. Before a multi-run wave, count the hosts that pass the GPU filter and the runs that will compete for
+  them, including your own other lanes. If runs exceed hosts with room, order the runs, or cut the batch so the
+  job fits the next GPU class. Two lanes of one project waited 7.7 h on each other this way.
 - **Never set `-M` below the measured peak, or cores below the measured best, just to start sooner.** If
   the measured request pends, find out why (`cluster-ops`, "Why is it pending?").
 - **Raising `-M` after every kill is not a fix.** Find what grows first.
