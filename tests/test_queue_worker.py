@@ -251,3 +251,150 @@ def test_worker_signal_still_stops_everything(env, sig):
     assert order(env) == ["long:train"]  # not re-queued, nothing else claimed
     st = qw(env, "status", "--queue", "q").stdout
     assert "next\tnormal\tpreempts=0\tqueued" in st
+
+
+# --- in-process tests of single behaviours (round 1 review fixes) ---
+
+def load_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("queue_worker", QW)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture
+def qwm():
+    return load_module()
+
+
+def claimed_task(qwm, q, tid="x", cmd=("sleep", "30"), **fields):
+    entry = {"id": tid, "cmd": list(cmd), "cwd": str(q.parent), "timeout_min": None, "added": "t",
+             "priority": "normal", **fields}
+    q.mkdir(exist_ok=True)
+    qwm.append_jsonl(str(q / "queue.jsonl"), entry)
+    return qwm.claim(str(q), "w", time.time() + 3600, 1)
+
+
+def test_grace_covers_whole_process_group(qwm, tmp_path):
+    # the leader exits at once on TERM, its child needs 2 s to write the checkpoint
+    (tmp_path / "child.py").write_text(
+        "import signal, sys, time\n"
+        "def h(s, f):\n    time.sleep(2)\n    open('ckpt', 'w').write('ok')\n    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, h)\nopen('ready', 'w').close()\n"
+        "while True:\n    time.sleep(0.05)\n")
+    proc = subprocess.Popen(["bash", "-c", f"trap 'exit 0' TERM; {sys.executable} child.py & wait"],
+                            cwd=tmp_path, start_new_session=True)
+    wait_for(tmp_path / "ready")
+    killed = qwm.stop_group(proc, signal.SIGTERM, 10)
+    assert proc.returncode == 0
+    assert killed is False
+    assert (tmp_path / "ckpt").read_text() == "ok"
+
+
+def test_preempted_result_written_before_requeue_under_lock(qwm, tmp_path, monkeypatch):
+    q = tmp_path / "q"
+    t = claimed_task(qwm, q, resume_cmd=["true"])
+    events = []
+
+    real_locked, real_write, real_append = qwm.locked, qwm.write_json, qwm.append_jsonl
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def rec_locked(qq):
+        with real_locked(qq):
+            events.append("lock")
+            yield
+            events.append("unlock")
+
+    def rec_write(path, obj):
+        events.append("result" if "/results/" in path else "write")
+        real_write(path, obj)
+
+    def rec_append(path, obj):
+        events.append(os.path.basename(path))
+        real_append(path, obj)
+
+    monkeypatch.setattr(qwm, "locked", rec_locked)
+    monkeypatch.setattr(qwm, "write_json", rec_write)
+    monkeypatch.setattr(qwm, "append_jsonl", rec_append)
+    new, line = qwm.requeue_entries(t, "w", "r", 1.0)
+    qwm.publish_result(str(q), t, {"id": "x", "status": "preempted", "attempt": 0}, (new, line))
+    assert events == ["lock", "result", "queue.jsonl", "preempt.log", "unlock"]
+
+
+def test_late_request_removed_with_result(qwm, tmp_path, monkeypatch, capsys):
+    q = tmp_path / "q"
+    t = claimed_task(qwm, q, cmd=["true"])
+    real_publish = qwm.publish_result
+
+    def request_then_publish(qq, tt, res, requeue=None):
+        # a request lands after the task ended but before its result is published
+        assert qwm.main(["preempt", "--queue", qq, "--task", "x", "--reason", "late"]) == 0
+        assert (q / "preempt" / "x.json").exists()
+        real_publish(qq, tt, res, requeue)
+
+    monkeypatch.setattr(qwm, "publish_result", request_then_publish)
+    r = qwm.run_task(str(q), t, "w", time.time() + 3600, {"preempt_poll_s": 0.05})
+    assert r["status"] == "done"
+    assert not (q / "preempt" / "x.json").exists()
+    assert "arrived after it ended" in capsys.readouterr().out
+
+
+def write_request(qwm, q, attempt=0):
+    qwm.write_json(str(q / "preempt" / "x.json"), {"task": "x", "attempt": attempt, "reason": "r", "time": "t"})
+
+
+def test_grace_capped_by_task_budget(qwm, tmp_path, monkeypatch):
+    q = tmp_path / "q"
+    t = claimed_task(qwm, q, timeout_min=0.05)  # 3 s budget
+    write_request(qwm, q)
+    seen = []
+
+    def fake_stop(proc, sig=signal.SIGTERM, grace=30.0):
+        seen.append(grace)
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        return False
+
+    monkeypatch.setattr(qwm, "stop_group", fake_stop)
+    r = qwm.run_task(str(q), t, "w", time.time() + 3600, {"preempt_grace": 120.0, "preempt_poll_s": 0.05})
+    assert r["status"] == "preempted"
+    assert 1.0 <= seen[0] <= 3.0
+    assert r["grace_s"] == round(seen[0], 1)
+
+
+def test_no_budget_left_is_a_timeout(qwm, tmp_path):
+    q = tmp_path / "q"
+    t = claimed_task(qwm, q)
+    write_request(qwm, q)
+    r = qwm.run_task(str(q), t, "w", time.time() - 10, {"preempt_grace": 120.0, "preempt_poll_s": 0.05})
+    assert r["status"] == "timeout"
+    assert not (q / "preempt.log").exists()
+    assert not (q / "preempt" / "x.json").exists()
+    assert [e.get("attempt", 0) for e in qwm.read_jsonl(str(q / "queue.jsonl"))] == [0]
+
+
+def test_stale_request_from_older_attempt_is_overwritten(env):
+    write_running_state(env, preempts=1)
+    (env / "q" / "preempt").mkdir()
+    (env / "q" / "preempt" / "x.json").write_text(json.dumps({"task": "x", "attempt": 0, "reason": "old"}))
+    r = qw(env, "preempt", "--queue", "q", "--task", "x", "--reason", "new")
+    assert "already open" not in r.stdout
+    req = json.loads((env / "q" / "preempt" / "x.json").read_text())
+    assert req["attempt"] == 1 and req["reason"] == "new"
+
+
+def test_preempted_high_task_stays_high_at_front(qwm, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    q = str(tmp_path / "q")
+    for tid, prio in [("h1", "high"), ("h2", "high"), ("n1", "normal")]:
+        qwm.main(["add", "--queue", q, "--id", tid, "--priority", prio, "--", "true"])
+    t = qwm.claim(q, "w")
+    assert t["id"] == "h1"
+    new, line = qwm.requeue_entries(t, "w", "r", 1.0)
+    qwm.publish_result(q, t, {"id": "h1", "status": "preempted", "attempt": 0}, (new, line))
+    nxt = qwm.claim(q, "w")
+    assert (nxt["id"], nxt["attempt"], nxt["priority"]) == ("h1", 1, "high")
+    assert [qwm.claim(q, "w")["id"] for _ in range(2)] == ["h2", "n1"]

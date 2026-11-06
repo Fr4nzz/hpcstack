@@ -24,8 +24,10 @@ without a priority count as normal.
 Repurposable slot (UNTESTED on a cluster, tested on synthetic tasks only): `preempt` writes a request
 file and signals nothing. The worker that runs the task checks for it every --preempt-poll-s seconds,
 sends the task's process group --preempt-signal so it can checkpoint and exit, waits --preempt-grace
-seconds, then KILLs the group. The task's result is "preempted", one line goes to preempt.log, and the
-task goes back into the queue at normal priority, ahead of other normal tasks, running its --resume-cmd
+seconds for every process in the group (not only the leader), then KILLs the group. The grace is capped
+by the task's and the worker's remaining time. With no time left the run counts as a timeout. The task's
+result is "preempted", one line goes to preempt.log, and the task goes back into the queue at its own
+priority, ahead of the other tasks of that priority, running its --resume-cmd
 (or the original command, which restarts from scratch). The worker then claims the next task, normally
 the high-priority one that motivated the preemption. A task is preempted at most twice. Use this only on
 your own queue and your own jobs. The idle exit stays on, so no allocation is held empty.
@@ -36,7 +38,8 @@ own results (read results/<id>.json). 128+N when signal N stopped it (bkill, sca
 sent by `bsub -wa USR2` or `sbatch --signal`): the running task's process group is stopped first and its
 result is written as "interrupted", so `done(<job>)` dependents do not fire on a half-drained queue.
 A signal to the worker always means "stop everything". It is never a preemption.
-Exit codes of `preempt`: 0 request written, 1 refused (task not running, unknown, or preempted twice).
+Exit codes of `preempt`: 0 request written, 1 refused (task not running, unknown, or preempted twice),
+2 no or empty --reason.
 """
 import argparse
 import fcntl
@@ -125,18 +128,35 @@ def _on_signal(signum, frame):
     raise Interrupted(signum)
 
 
+def group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def stop_group(proc, sig=signal.SIGTERM, grace=30.0):
-    """Send `sig` to the task's process group, wait up to `grace` s for the task, then KILL the group.
-    Returns True when the task had to be killed."""
+    """Send `sig` to the task's process group, wait up to `grace` s for the whole group to exit (a launcher
+    that exits at once must not cut its children's checkpoint short), then KILL the group.
+    Returns True when something was still running at the end of the grace period."""
     try:
         os.killpg(proc.pid, sig)
     except ProcessLookupError:
         return False
+    end = time.monotonic() + grace
     killed = False
     try:
         proc.wait(timeout=grace)
     except subprocess.TimeoutExpired:
         killed = True
+    while not killed and group_alive(proc.pid):
+        if time.monotonic() >= end:
+            killed = True
+            break
+        time.sleep(0.05)
     try:
         os.killpg(proc.pid, signal.SIGKILL)  # the task's own children, or the task if it ignored the signal
     except ProcessLookupError:
@@ -235,28 +255,34 @@ def claim(q, me, deadline=None, grace=None):
         return t
 
 
-def requeue_preempted(q, t, me, reason, runtime_s, log):
-    """Put a preempted task back at the front of the normal queue and log the preemption."""
-    p = paths(q)
+def requeue_entries(t, me, reason, runtime_s):
+    """The queue line that puts a preempted task back at the front of its own priority, and its log line."""
     n = int(t.get("preempts", 0)) + 1
     resume = t.get("resume_cmd")
-    new = dict(t, attempt=attempt_of(t) + 1, preempts=n, priority="normal", front=True, requeued=now(),
+    new = dict(t, attempt=attempt_of(t) + 1, preempts=n, front=True, requeued=now(),
                cmd=resume or t["cmd"], prior_runtime_s=round(float(t.get("prior_runtime_s", 0)) + runtime_s, 1))
-    if not resume:
-        msg = f"# {now()} WARNING no resume command: {t['id']} restarts from scratch\n"
-        log.write(msg)
-        print(msg.strip("# \n"), flush=True)
+    logline = {"time": now(), "task": t["id"], "attempt": attempt_of(t), "worker": me, "job": job_id(),
+               "host": socket.gethostname(), "reason": reason, "runtime_s": round(runtime_s, 1),
+               "total_runtime_s": new["prior_runtime_s"], "preempt_count": n, "resume_cmd": bool(resume)}
+    return new, logline
+
+
+def publish_result(q, t, res, requeue=None):
+    """Under the queue lock (the one `preempt` takes): write the attempt's result first, then re-queue it
+    if it was preempted, then remove its preempt request, so no request outlives the attempt and no
+    stale result overwrites the next attempt's."""
+    p = paths(q)
+    rpath = os.path.join(p["preempt"], f"{t['id']}.json")
     with locked(q):
-        append_jsonl(p["queue"], new)
-        append_jsonl(p["preempt_log"], {
-            "time": now(), "task": t["id"], "attempt": attempt_of(t), "worker": me, "job": job_id(),
-            "host": socket.gethostname(), "reason": reason, "runtime_s": round(runtime_s, 1),
-            "total_runtime_s": new["prior_runtime_s"], "preempt_count": n, "resume_cmd": bool(resume)})
-        try:
-            os.remove(os.path.join(p["preempt"], f"{t['id']}.json"))
-        except FileNotFoundError:
-            pass
-    return n
+        write_json(os.path.join(p["results"], f"{t['id']}.json"), res)
+        if requeue is not None:
+            append_jsonl(p["queue"], requeue[0])
+            append_jsonl(p["preempt_log"], requeue[1])
+        late = os.path.exists(rpath)
+        if late:
+            os.remove(rpath)
+    if late and res["status"] != "preempted":
+        print(f"{now()} preempt request for {t['id']} arrived after it ended, removed", flush=True)
 
 
 def preempt_request(q, t):
@@ -289,7 +315,7 @@ def run_task(q, t, me, deadline, opts=None):
     start = time.time()
     end_by = start + limit
     status, rc, interrupted = "done", None, None
-    extra = {}
+    extra, requeue = {}, None
     attempt = attempt_of(t)
     with open(os.path.join(p["logs"], f"{t['id']}.log"), "a" if attempt else "w") as log:
         log.write(f"# {now()} {me}" + (f" attempt {attempt} (after {t.get('preempts', 0)} preemption(s))"
@@ -317,18 +343,27 @@ def run_task(q, t, me, deadline, opts=None):
                         if req is None:
                             continue
                     reason = req.get("reason", "")
-                    log.write(f"# {now()} preempt requested by {req.get('user')}@{req.get('host')}: {reason}\n"
-                              f"# sending {psig.name}, grace {pgrace:g} s\n")
+                    budget = min(end_by, deadline) - time.time()
+                    log.write(f"# {now()} preempt requested by {req.get('user')}@{req.get('host')}: {reason}\n")
+                    if budget <= 0:  # no time left to checkpoint in: this run is a timeout
+                        log.write(f"# {now()} no time left for a grace period, recorded as timeout\n")
+                        raise subprocess.TimeoutExpired(t["cmd"], limit)
+                    grace = max(1.0, min(pgrace, budget))
+                    log.write(f"# sending {psig.name}, grace {grace:g} s\n")
                     log.flush()
-                    killed = stop_group(proc, psig, pgrace)
+                    killed = stop_group(proc, psig, grace)
                     rc = proc.wait()
                     status = "preempted"
-                    runtime = time.time() - start
                     log.write(f"# {now()} task {'killed after the grace period' if killed else 'exited'}"
                               f" rc={rc}\n")
-                    n = requeue_preempted(q, t, me, reason, runtime, log)
+                    requeue = requeue_entries(t, me, reason, time.time() - start)
+                    if not t.get("resume_cmd"):
+                        msg = f"WARNING no resume command: {t['id']} restarts from scratch"
+                        log.write(f"# {now()} {msg}\n")
+                        print(f"{now()} {msg}", flush=True)
                     extra = {"reason": reason, "preempt_exit": "killed" if killed else "exited",
-                             "preempt_count": n, "requested": req.get("time")}
+                             "preempt_count": requeue[1]["preempt_count"], "requested": req.get("time"),
+                             "grace_s": round(grace, 1)}
                     break
             except subprocess.TimeoutExpired:
                 status = "timeout"
@@ -344,19 +379,13 @@ def run_task(q, t, me, deadline, opts=None):
                 os.killpg(proc.pid, signal.SIGKILL)  # orphans left in the task's session
             except ProcessLookupError:
                 pass
-    if status != "preempted" and os.path.exists(os.path.join(p["preempt"], f"{t['id']}.json")):
-        try:  # the request came too late: the task had already ended
-            os.remove(os.path.join(p["preempt"], f"{t['id']}.json"))
-        except FileNotFoundError:
-            pass
-        print(f"{now()} preempt request for {t['id']} arrived after it ended, removed", flush=True)
     res = {"id": t["id"], "status": status, "returncode": rc, "worker": me, "start": iso(start), "end": now(),
            "runtime_s": round(time.time() - start, 1), "attempt": attempt,
            "preempts": int(t.get("preempts", 0)) + (1 if status == "preempted" else 0)}
     if attempt:
         res["prior_runtime_s"] = t.get("prior_runtime_s", 0)
     res.update(extra)
-    write_json(os.path.join(p["results"], f"{t['id']}.json"), res)
+    publish_result(q, t, res, requeue)
     if interrupted is not None:
         raise interrupted
     return res
@@ -452,7 +481,8 @@ def cmd_preempt(a):
                   "Let it finish or give the new work its own job")
             return 1
         rpath = os.path.join(p["preempt"], f"{a.task}.json")
-        if os.path.exists(rpath):
+        old = read_json(rpath) if os.path.exists(rpath) else None
+        if old is not None and attempt_of(old) == attempt_of(t):
             print(f"a preempt request for {a.task} is already open: {rpath}")
             return 0
         write_json(rpath, {"task": a.task, "attempt": attempt_of(t), "reason": reason, "time": now(),

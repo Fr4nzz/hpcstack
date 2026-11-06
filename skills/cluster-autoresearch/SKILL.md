@@ -80,15 +80,19 @@ scripts/queue_worker.py preempt --queue q/ --task w04_full --reason "ablation de
   A bare batch job cannot take new work, a worker can.
 - Prefer queueing into your running worker over a new submission when the queue is long. Preempt only with
   a recorded reason that the new work is worth more.
-- `preempt` writes `q/preempt/<id>.json` and signals nothing. Within about 10 s the worker sends the task
-  `--preempt-signal` (default TERM), waits `--preempt-grace` (120 s), then KILLs it. The task is recorded as
-  `preempted`, logged in `q/preempt.log`, and re-queued ahead of other normal tasks with its `--resume-cmd`.
-  The high-priority task runs next in the same allocation.
+- Add the high task BEFORE you preempt. With several workers it may run on a different worker.
+- `preempt` writes `q/preempt/<id>.json` and signals nothing. Within about 10 s the worker sends the task's
+  process group `--preempt-signal` (default TERM), waits up to `--preempt-grace` (120 s, capped by the time
+  left) for the whole group, then KILLs it. The task is recorded as `preempted`, logged in `q/preempt.log`,
+  and re-queued at its own priority, ahead of the other tasks of that priority, with its `--resume-cmd`.
+  With one worker, the queued high task runs next in the same allocation.
 - The preempted run loses the work since its last checkpoint, for example up to one epoch when the trainer
   resumes from its last-epoch checkpoint. Without `--resume-cmd` it restarts from scratch.
 - A task is preempted at most twice. `preempt` prints the worker's time left and warns when a high task's
   `--est-min` does not fit. `bkill` or USR2 on the worker still stops everything.
-- Fair use: your own queue and jobs only, no idle allocations held, the idle exit stays on.
+- Fair use: your own queue and jobs only, no idle allocations held, the idle exit stays on. Reuse an
+  allocation only for work that its queue, resource request and site policy allow. Never extend or renew
+  an allocation, or keep it busy, just to keep the slot.
 
 ## Attribution
 
