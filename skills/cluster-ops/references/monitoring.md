@@ -21,7 +21,7 @@ Good: one background watcher that polls every 60 s and exits on a terminal state
 
 ```bash
 # LSF. UNTIL=RUN before a long handoff. Over ssh, put the ssh command inside the timeout.
-J=1234; UNTIL=END; CAP=1500; PEND_S=1200   # background slot (1800 s): CAP + 60 s sleep + 60 s query < slot; foreground (600 s): CAP=420 PEND_S=300
+J=1234; UNTIL=END; CAP=2700; PEND_S=1200   # run in the background with an explicit tool timeout >= CAP+180 s (e.g. 3000 s); foreground (600 s): CAP=420 PEND_S=300
 ts=$(date +%s); t0=${T0:-$ts}   # ts: this call (CAP). t0: first call (PEND_S); pass T0 on a re-run
 while :; do
   rc=0; r=$(timeout 60 bjobs -noheader -o stat "$J" 2>&1) || rc=$?; s=${r##*$'\n'}   # survives set -e
@@ -37,7 +37,7 @@ while :; do
   sleep 60
 done
 # SLURM, same shape
-J=1234; UNTIL=END; CAP=1500; PEND_S=1200; ts=$(date +%s); t0=${T0:-$ts}
+J=1234; UNTIL=END; CAP=2700; PEND_S=1200; ts=$(date +%s); t0=${T0:-$ts}
 while :; do
   rc=0; r=$(timeout 60 sacct -n -X -P -j "$J" -o State 2>&1) || rc=$?; s=${r%%$'\n'*}; s=${s%% *}
   case $s in
@@ -69,14 +69,16 @@ What the output means:
 - A `status.json` or checkpoint that stopped advancing while the job is RUN means a helper died or the job
   hangs.
 
-**Short waits (under about 1 h): wait inside one tool call** with the loop above, using your harness's
+**Short waits (under about 45 min): wait inside one tool call** with the loop above, using your harness's
 background facility (a background command or monitor), or one foreground command within the tool timeout.
-Never a series of `sleep` tool calls or repeated short polls. Set the background tool's own timeout above the
+Never a series of `sleep` tool calls, repeated short polls, or re-armed loops. If an agent coordinator relays
+every turn end to a parent chat (some do, whatever the message says), each re-arm costs the parent a wake: one
+child woke its coordinator 12 times overnight by re-arming a 25-minute loop. Set the background tool's own timeout above the
 loop's cap: a loop capped at 90 min inside a 30 min background slot is killed at 30 min. The loop's real
 length is its cap plus one sleep step plus one query timeout. Keep that sum under the tool timeout: two loops
 that slept 600 s before checking a 2 h cap were killed before they reported.
 
-**Long waits (over about 1 h):** first run the loop with `UNTIL=RUN`, and hand off only a running job. A
+**Long waits (over about 45 min):** first run the loop with `UNTIL=RUN`, and hand off only a running job. A
 watcher that wakes on ended jobs does not wake on PEND, so a job still pending past `PEND_S` (20 min) is reported with
 its reason instead. Once it runs, write the job ids, expected outputs and the next step to a state file, then
 let a model-free watcher wake the agent on a state change. Prefer that to one wake at the projected finish:
