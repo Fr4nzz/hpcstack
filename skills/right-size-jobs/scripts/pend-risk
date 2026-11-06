@@ -15,7 +15,8 @@ Usage:
 
 Similar jobs: same queue, same GPU-memory class (above --gmem-threshold GiB, or at or below it / no GPU
 memory), same pin (a GPU model pin or a host list: yes/no), submitted in the last --weeks weeks.
-Below 20 similar jobs it says so. Live host count: from --hosts-snapshot (last line), or from `bhosts`
+Below 20 similar jobs with a known outcome (started, or already
+pending over 1 h) it says so. The median wait is over the jobs that started. Live host count: from --hosts-snapshot (last line), or from `bhosts`
 if it is on PATH (skip with --no-live).
 
 Why no ETA: on one user's 10,490 LSF jobs, no model predicted waits over 1 h on a GPU queue (AUC about
@@ -113,7 +114,8 @@ def above(gmem, thr):
 def summarize(jobs):
     known = [j for j in jobs if j["started"] or j["wait_s"] > LONG_S]
     long_ = sum(1 for j in known if j["wait_s"] > LONG_S)
-    med = statistics.median(j["wait_s"] for j in jobs) if jobs else None
+    waits = [j["wait_s"] for j in jobs if j["started"]]
+    med = statistics.median(waits) if waits else None
     return {"n": len(jobs), "known": len(known), "long": long_,
             "pct": 100.0 * long_ / len(known) if known else None, "median_s": med}
 
@@ -184,17 +186,18 @@ def main(argv=None):
     weeks = f"{a.weeks:g} weeks"
     print(f"Request: queue {queue}, {gm_txt} ({cls}), {'with' if pin else 'no'} model or host pin")
     s = summarize(group(hi, pin))
+    med = f"median wait of those that started {fmt_wait(s['median_s'])}"
     if s["n"] == 0:
         print(f"No similar jobs in the last {weeks}: too few similar jobs to say.")
-    elif s["n"] < MIN_N:
-        print(f"Of {s['n']} similar jobs in the last {weeks}, {s['long']} of {s['known']} waited over 1 h "
-              f"(median wait {fmt_wait(s['median_s'])}). Too few similar jobs to say (fewer than {MIN_N}).")
+    elif s["known"] < MIN_N:
+        print(f"Of {s['n']} similar jobs in the last {weeks}, {s['long']} of the {s['known']} with a known outcome "
+              f"waited over 1 h ({med}). Too few similar jobs to say (fewer than {MIN_N} known outcomes).")
     else:
-        print(f"Of {s['n']} similar jobs in the last {weeks}, {s['pct']:.0f} % waited over 1 h "
-              f"(median wait {fmt_wait(s['median_s'])}).")
+        print(f"Of {s['n']} similar jobs in the last {weeks}, {s['pct']:.0f} % of the {s['known']} with a known "
+              f"outcome waited over 1 h ({med}).")
 
     hints = []
-    if s["n"] >= MIN_N and s["pct"] is not None:
+    if s["known"] >= MIN_N:
         alts = []
         if hi:
             alts.append((group(False, pin), f"jobs with GPU memory at or below {thr:g}G",
@@ -205,9 +208,9 @@ def main(argv=None):
                          "Drop the pin if the job runs on any GPU that meets the memory request."))
         for jobs, label, advice in alts:
             o = summarize(jobs)
-            if o["n"] >= MIN_N and o["pct"] is not None and s["pct"] - o["pct"] >= 10:
+            if o["known"] >= MIN_N and s["pct"] - o["pct"] >= 10:
                 hints.append(f"Hint: {label} waited over 1 h in {o['pct']:.0f} % of cases in the same weeks "
-                             f"(n = {o['n']}). {advice}")
+                             f"(n = {o['known']} with a known outcome). {advice}")
     for h in hints:
         print(h)
 

@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -19,8 +20,9 @@ PENDRISK = os.path.join(SCRIPTS, "pend-risk")
 # Fake LSF commands. They read $FAKE_STATE (a JSON file) so a test can change what they report.
 FAKES = {
     "bqueues": r'''
-import json, os, sys
+import json, os, sys, time
 st = json.load(open(os.environ["FAKE_STATE"]))
+time.sleep(st.get("bqueues_sleep", 0))
 if "-r" in sys.argv:
     print("QUEUE: gpu")
     print("SHARE_INFO_FOR: gpu/")
@@ -61,16 +63,36 @@ for j in ids:
 print(json.dumps({"COMMAND": "bjobs", "JOBS": len(recs), "RECORDS": recs}))
 ''',
     "bhist": r'''
-import sys
+import json, os, sys
+open(os.environ["FAKE_STATE"] + ".bhist_args", "a").write(" ".join(sys.argv[1:]) + "\n")
+if json.load(open(os.environ["FAKE_STATE"])).get("bhist_none"):
+    sys.exit(0)
 print("Job <%s>, User <u>, Project <default>, Command <x>" % sys.argv[-1])
 print("Summary of time in seconds spent in various states:")
 print("  PEND     PSUSP    RUN      USUSP    SSUSP    UNKWN    TOTAL")
 print("  5000     0        300      0        0        0        5300")
 ''',
+    "sbatch": r'''
+print("777;cluster1")
+''',
     "bsub": r'''
 import json, os, sys
 st = json.load(open(os.environ["FAKE_STATE"]))
 open(os.environ["FAKE_STATE"] + ".bsub_stdin", "w").write(sys.stdin.read() if not sys.stdin.isatty() else "")
+mode = st.get("bsub_mode")
+if "-Is" in sys.argv:
+    print(f"interactive pid={os.getpid()}")
+    sys.exit(0)
+if mode == "bytes":
+    sys.stdout.buffer.write(b"Job <4300> is submitted to queue <gpu>.\r\nno newline at end")
+    sys.stderr.buffer.write(b"warn\r\n\xff")
+    sys.exit(0)
+if mode == "slow":
+    print("Job <4301> is submitted to queue <gpu>.", flush=True)
+    import time; time.sleep(4)
+    sys.exit(0)
+if mode == "sigterm":
+    import signal; os.kill(os.getpid(), signal.SIGTERM)
 if st.get("bsub_rc", 0):
     sys.stderr.write("Bad resource requirement syntax. Job not submitted.\n")
     sys.exit(st["bsub_rc"])
@@ -240,10 +262,10 @@ def test_risk_threshold_split_and_hint(lsf):
     hist = lsf["tmp"] / "h.csv"
     write_export(hist, synthetic(25, 40, 10, 4))
     out = pend_risk(lsf, hist, "-q gpu -n 4 -gpu 'num=1:gmem=40G'").stdout
-    assert "Of 25 similar jobs in the last 4 weeks, 40 % waited over 1 h (median wait 30 s)." in out
+    assert "Of 25 similar jobs in the last 4 weeks, 40 % of the 25 with a known outcome waited over 1 h" in out
     assert "Hint: jobs with GPU memory at or below 32G waited over 1 h in 10 % of cases" in out
     out = pend_risk(lsf, hist, "-q gpu -gpu 'num=1:gmem=32G'").stdout
-    assert "Of 40 similar jobs in the last 4 weeks, 10 % waited over 1 h" in out
+    assert "Of 40 similar jobs in the last 4 weeks, 10 % of the 40" in out
     assert "Hint" not in out
     # threshold is configurable: at 48G the 40G request joins the small class
     out = pend_risk(lsf, hist, "-q gpu -gpu 'num=1:gmem=40G'", "--gmem-threshold", "48").stdout
@@ -254,7 +276,7 @@ def test_risk_small_n(lsf):
     hist = lsf["tmp"] / "h.csv"
     write_export(hist, synthetic(5, 40, 3, 4))
     out = pend_risk(lsf, hist, "-q gpu -gpu 'num=1:gmem=40G'").stdout
-    assert "Of 5 similar jobs in the last 4 weeks, 3 of 5 waited over 1 h" in out
+    assert "Of 5 similar jobs in the last 4 weeks, 3 of the 5 with a known outcome waited over 1 h" in out
     assert "too few similar jobs to say" in out.lower()
     assert "Hint" not in out
     out = pend_risk(lsf, hist, "-q gpu -gpu 'num=1:gmodel=NVIDIAH10080GBHBM3:gmem=40G'").stdout
@@ -319,9 +341,134 @@ def test_risk_reads_study_csv(lsf):
     write_acct(hist)
     out = pend_risk(lsf, hist, "-q gpu -gpu 'num=1:gmem=40G'").stdout
     # 8 plain + 1 array start (5100 s) + 1 killed while pending = 10 jobs, 9 known outcomes, 5 long
-    assert "Of 10 similar jobs in the last 4 weeks, 5 of 9 waited over 1 h" in out
+    assert "Of 10 similar jobs in the last 4 weeks, 5 of the 9 with a known outcome waited over 1 h" in out
     assert "too few similar jobs to say" in out.lower()
     out = pend_risk(lsf, hist, "-q gpu -gpu 'num=1:gmem=16G'").stdout
-    assert "Of 6 similar jobs" in out and "0 of 6 waited over 1 h" in out
+    assert "Of 6 similar jobs" in out and "0 of the 6 with a known outcome" in out
     out = pend_risk(lsf, hist, "-q gpu -gpu 'num=1:gmodel=NVIDIAH10080GBHBM3:gmem=40G'").stdout
     assert "Of 1 similar jobs" in out
+
+
+# ---------------------------------------------------------------- review round 1 fixes
+def submit(lsf, *args, **kw):
+    return run(lsf, PENDLOG, "submit", "--out", str(lsf["out"]), "--", *args, **kw)
+
+
+def test_parser_value_options_before_queue(lsf):  # O1
+    submit(lsf, "bsub", "-oo", "log.txt", "-env", "all", "-q", "gpu", "-gpu", "num=1:gmem=40G", "-K", "-n", "4", "x")
+    req = jsonl(lsf["out"] / "jobs.jsonl")[-1]["request"]
+    assert (req["queue"], req["gmem_gb"], req["cores"]) == ("gpu", 40, 4)
+
+
+def test_bsub_c_is_not_cores(lsf):  # O2
+    run(lsf, PENDLOG, "submit", "--out", str(lsf["out"]), "--", "bsub", "-c", "30", "-q", "gpu", "x")
+    assert jsonl(lsf["out"] / "jobs.jsonl")[-1]["request"]["cores"] is None
+    submit(lsf, "sbatch", "-c", "6", "-p", "gpu", "--parsable", "job.sh")
+    rec = jsonl(lsf["out"] / "jobs.jsonl")[-1]
+    assert (rec["request"]["cores"], rec["request"]["queue"]) == (6, "gpu")
+    assert rec["job_id"] == "777"  # O9: sbatch --parsable
+
+
+def test_submit_output_bytes_unchanged(lsf):  # S3
+    set_state(lsf, bsub_mode="bytes")
+    r = subprocess.run([sys.executable, PENDLOG, "submit", "--out", str(lsf["out"]), "--", "bsub", "-q", "gpu", "x"],
+                       env=lsf["env"], capture_output=True, timeout=60, input=b"")
+    assert r.stdout == b"Job <4300> is submitted to queue <gpu>.\r\nno newline at end"
+    assert r.stderr == b"warn\r\n\xff"
+    assert jsonl(lsf["out"] / "jobs.jsonl")[-1]["job_id"] == "4300"
+
+
+def test_submit_streams_output(lsf):  # S3
+    set_state(lsf, bsub_mode="slow")
+    p = subprocess.Popen([sys.executable, PENDLOG, "submit", "--out", str(lsf["out"]), "--", "bsub", "-q", "gpu", "x"],
+                         env=lsf["env"], stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
+    t0 = time.time()
+    line = p.stdout.readline()
+    assert line == b"Job <4301> is submitted to queue <gpu>.\n" and p.poll() is None  # before bsub exits
+    assert p.wait(timeout=30) == 0 and time.time() - t0 >= 3
+
+
+def test_interactive_submit_execs(lsf):  # O3
+    p = subprocess.Popen([sys.executable, PENDLOG, "submit", "--out", str(lsf["out"]), "--", "bsub", "-Is", "-q", "gpu",
+                          "bash"], env=lsf["env"], stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True)
+    out, _ = p.communicate(timeout=60)
+    assert out == f"interactive pid={p.pid}\n"  # same process: pendlog exec'd bsub
+    rec = jsonl(lsf["out"] / "jobs.jsonl")[-1]
+    assert rec["interactive"] and rec["job_id"] is None
+
+
+def test_signal_exit_code(lsf):  # O11
+    set_state(lsf, bsub_mode="sigterm")
+    assert submit(lsf, "bsub", "-q", "gpu", "x", check=False).returncode == 143
+
+
+def test_stdin_script_on_terminal(lsf):  # O10
+    import pty
+    master, slave = pty.openpty()
+    try:
+        r = subprocess.run([sys.executable, PENDLOG, "submit", "--stdin-script", "--out", str(lsf["out"]), "--",
+                            "bsub"], env=lsf["env"], stdin=slave, capture_output=True, text=True, timeout=60)
+    finally:
+        os.close(master)
+        os.close(slave)
+    assert r.returncode == 2 and "bsub < job.sh" in r.stderr
+
+
+def test_lost_job_stops_after_two_tries(lsf):  # O4
+    submit(lsf, "bsub", "-q", "gpu", "x")
+    set_state(lsf, bhist_none=True)
+    for _ in range(3):
+        run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))
+    ev = [e for e in jsonl(lsf["out"] / "jobs.jsonl") if e["kind"] == "started"]
+    assert [e["final"] for e in ev] == [False, True] and ev[-1]["unknown"]
+    args = (lsf["state"].parent / "state.json.bhist_args").read_text().splitlines()
+    assert args == ["-n 3 -l 4242"] * 2
+
+
+def test_submit_reuses_recent_snapshot(lsf):  # O5
+    submit(lsf, "bsub", "-q", "gpu", "-gpu", "num=1:gmem=40G", "x")
+    set_state(lsf, next_id=4243)
+    submit(lsf, "bsub", "-q", "gpu", "-gpu", "num=1:gmem=40G", "y")
+    set_state(lsf, next_id=4244)
+    submit(lsf, "bsub", "-q", "gpu", "-gpu", "num=1:gmem=8G", "z")
+    snaps = jsonl(lsf["out"] / "snapshots.jsonl")
+    subs = jsonl(lsf["out"] / "jobs.jsonl")
+    assert len(snaps) == 2
+    assert subs[0]["snapshot_id"] == subs[1]["snapshot_id"] == snaps[0]["snap_id"] != subs[2]["snapshot_id"]
+
+
+def test_submit_snapshot_time_capped(lsf):  # O5
+    set_state(lsf, bqueues_sleep=30)
+    t0 = time.time()
+    r = submit(lsf, "bsub", "-q", "gpu", "x")
+    assert time.time() - t0 < 20 and "Job <4242>" in r.stdout
+    assert any("budget" in e or "timeout" in e for e in jsonl(lsf["out"] / "snapshots.jsonl")[-1]["errors"])
+
+
+def test_export_joins_on_snapshot_id(lsf):  # S2/O7
+    submit(lsf, "bsub", "-q", "gpu", "-gpu", "num=1:gmem=40G", "x")
+    set_state(lsf, next_id=4243)
+    submit(lsf, "bsub", "-q", "gpu", "-gpu", "num=1:gmem=8G", "y")
+    # force both submits and snapshots onto the same second, as fast submits are
+    for name in ("jobs.jsonl", "snapshots.jsonl"):
+        f = lsf["out"] / name
+        f.write_text("".join(json.dumps(dict(r, ts=1)) + "\n" for r in jsonl(f)))
+    rows = {x["job_id"]: x for x in csv.DictReader(io.StringIO(run(lsf, PENDLOG, "export", "--out",
+                                                                   str(lsf["out"])).stdout))}
+    assert (rows["4242"]["snap_hosts_fit"], rows["4243"]["snap_hosts_fit"]) == ("1", "2")
+
+
+def test_risk_gate_counts_known_outcomes(lsf):  # S1
+    hist = lsf["tmp"] / "h.csv"
+    with open(hist, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=EXPORT_COLS)
+        w.writeheader()
+        for i in range(25):  # pending under 1 h so far: outcome unknown
+            w.writerow({"job_id": i, "submit_ts": NOW - 3600, "queue": "gpu", "gmem_gb": 40, "pin": 0,
+                        "started": 0, "pend_s": 600, "pend_censored": 1})
+        w.writerow({"job_id": 99, "submit_ts": NOW - 7200, "queue": "gpu", "gmem_gb": 40, "pin": 0,
+                    "started": 1, "pend_s": 120, "pend_censored": 0})
+    out = pend_risk(lsf, hist, "-q gpu -gpu num=1:gmem=40G").stdout
+    assert "Of 26 similar jobs in the last 4 weeks, 0 of the 1 with a known outcome waited over 1 h" in out
+    assert "median wait of those that started 2 min" in out and "too few similar jobs to say" in out.lower()
+    assert "%" not in out

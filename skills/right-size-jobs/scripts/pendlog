@@ -14,14 +14,20 @@ snapshot  Runs light commands only, each with a timeout (--timeout, default 20 s
           `bhosts -gpu -w` and `bhosts -w <gpu hosts>` when the request asks for a GPU, your own RUN and
           PEND counts from `bjobs -u $USER`, and your fairshare line from `bqueues -r Q`. Appends one JSON
           line to DIR/snapshots.jsonl. It never fails: errors go into the line's "errors" list, exit 0.
-submit    Takes a snapshot, runs the bsub (or sbatch) command, records the job id and the full request in
-          DIR/jobs.jsonl, prints the command's output unchanged and exits with its exit code. Options are
-          read from the command line only. With --stdin-script, stdin is read, its #BSUB lines are parsed
-          too, and it is passed on to bsub (for `pendlog submit --stdin-script -- bsub < job.sh`).
+submit    Takes a snapshot (or reuses one under 60 s old for the same queue and shape, and spends at most
+          about 10 s on it), runs the bsub (or sbatch) command, records the job id and the full request in
+          DIR/jobs.jsonl, and exits with the command's exit code (128 + N if killed by signal N). Its
+          stdout and stderr pass through byte for byte as they arrive. Options are read from the command
+          line only. With --stdin-script, stdin is read, its #BSUB lines are parsed too, and it is passed on
+          to bsub (for `pendlog submit --stdin-script -- bsub < job.sh`).
+          Interactive or blocking submits (bsub -I, -Is, -Ip, -IX, -K, and srun or salloc) are logged
+          first, without a job id, then pendlog replaces itself with the command (exec), so the terminal
+          belongs to the job. `started` cannot follow them.
 started   For logged jobs with no start yet (submitted in the last --since hours, default 72), reads the
           state, start time, PEND seconds and pending reason with one
           `bjobs -o "jobid jobindex stat submit_time start_time pend_time pend_reason" -json` call, falling
-          back to `bhist -n 10 -l` for purged jobs. Appends one line per job to DIR/jobs.jsonl. Schedule it
+          back to `bhist -n 3 -l` for purged jobs (a job found by neither in 2 tries is marked
+          final, as unknown). Appends one line per job to DIR/jobs.jsonl. Schedule it
           every 10 to 15 min while jobs pend, or call it from a wait loop.
 export    One CSV row per logged job: the request, the snapshot at submit, PEND seconds and the last
           pending reason. Feed it to `pend-risk --history`.
@@ -38,10 +44,16 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
+import uuid
 import sys
 import time
 
 TIMEOUT = 20
+DEADLINE = None  # epoch seconds; set by submit so the snapshot can't hold up the bsub
+SUBMIT_SNAPSHOT_BUDGET = 10
+SNAPSHOT_REUSE_S = 60
+INTERACTIVE_FLAGS = {"-I", "-Is", "-Ip", "-IX", "-K"}
 UNIT_MB = {"": 1.0, "k": 1 / 1024, "m": 1.0, "g": 1024.0, "t": 1024.0 ** 2}
 RUN_STATES = {"RUN", "DONE", "USUSP", "SSUSP", "RUNNING", "COMPLETED", "SUSPENDED"}
 
@@ -80,16 +92,28 @@ def bsub_lines(script_text):
     return args
 
 
+# bsub options that take a value. Everything else starting with "-" is a flag (-I, -K, -B, -N, -r, -x, ...).
+BSUB_WITH_VAL = set("""
+    -q -n -M -R -gpu -J -m -W -o -e -oo -eo -i -is -P -G -w -cwd -u -app -sla -g -E -Ep -L -k -b -We -env -data
+    -Jd -outdir -a -ext -U -C -D -S -F -T -sp -Lp -mig -s -c -v -t -f -cn_mem -cn_cu -jsdl -jsdl_strict -hostfile
+    -pack -alloc_flags -csm -smt -stage -network -nnodes -freq -ptl -rnc -eptl -clusters -wa -wt -Q -p
+""".split())
+SLURM_SUBMIT = ("sbatch", "srun", "salloc")
+SLURM_WITH_VAL = {"-A", "-a", "-b", "-c", "-C", "-d", "-D", "-e", "-G", "-i", "-J", "-L", "-M", "-m", "-n", "-N",
+                  "-o", "-p", "-q", "-S", "-t", "-w", "-x", "--partition", "--cpus-per-task", "--mem", "--gres",
+                  "--gpus", "--time", "--account", "--job-name", "--output", "--error"}
+
+
 def parse_request(args):
     """bsub (or sbatch) arguments -> request dict. Unknown options are ignored."""
     args = list(args)
-    if args and os.path.basename(args[0]) in ("bsub", "sbatch"):
+    slurm = bool(args) and os.path.basename(args[0]) in SLURM_SUBMIT
+    if args and os.path.basename(args[0]) in ("bsub",) + SLURM_SUBMIT:
         args = args[1:]
     r = {"queue": None, "cores": None, "mem_mb": None, "gpu_num": None, "gmem_gb": None, "gmodel": "",
          "j_exclusive": False, "pin": False, "host_incl": [], "host_excl": [], "array_size": 1,
          "runlimit": None, "resreq": []}
-    with_val = {"-q", "-n", "-M", "-R", "-gpu", "-J", "-m", "-W", "-o", "-e", "-P", "-G", "-w", "-cwd",
-                "-p", "--partition", "-c", "--cpus-per-task", "--mem", "--gres", "--gpus", "-t", "--time"}
+    with_val = SLURM_WITH_VAL if slurm else BSUB_WITH_VAL
     i = 0
     while i < len(args):
         a = args[i]
@@ -101,20 +125,20 @@ def parse_request(args):
             i += 1
         elif not a.startswith("-"):
             break  # the command starts here
-        if a in ("-q", "-p", "--partition"):
+        if (a == "-q" and not slurm) or (a in ("-p", "--partition") and slurm):
             r["queue"] = val
-        elif a in ("-n", "-c", "--cpus-per-task"):
+        elif (a == "-n" and not slurm) or (a in ("-c", "--cpus-per-task") and slurm):
             try:
                 r["cores"] = int(str(val).split(",")[-1])
             except ValueError:
                 pass
-        elif a in ("-M", "--mem"):
+        elif (a == "-M" and not slurm) or a == "--mem":
             r["mem_mb"] = mem_mb(val)
-        elif a == "-W" or a in ("-t", "--time"):
+        elif (a == "-W" and not slurm) or (a in ("-t", "--time") and slurm):
             r["runlimit"] = val
-        elif a == "-m":
+        elif a == "-m" and not slurm:
             r["host_incl"] += str(val).split()
-        elif a == "-J":
+        elif a == "-J" and not slurm:
             m = re.search(r"\[(.*?)\]", str(val))
             if m:
                 n = 0
@@ -157,15 +181,22 @@ def parse_request(args):
 # ---------------------------------------------------------------- commands
 def run(cmd, timeout=None, errors=None):
     """Run a command with a timeout. Returns stdout, or None (and notes the error)."""
+    timeout = timeout or TIMEOUT
+    if DEADLINE is not None:
+        timeout = min(timeout, DEADLINE - time.time())
+        if timeout <= 0:
+            if errors is not None:
+                errors.append(f"{' '.join(cmd[:3])}: skipped, snapshot time budget used up")
+            return None
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout or TIMEOUT)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
         if errors is not None:
             errors.append(f"{cmd[0]}: not found")
         return None
     except subprocess.TimeoutExpired:
         if errors is not None:
-            errors.append(f"{' '.join(cmd[:3])}: timeout after {timeout or TIMEOUT} s")
+            errors.append(f"{' '.join(cmd[:3])}: timeout after {timeout:.0f} s")
         return None
     except OSError as e:
         if errors is not None:
@@ -322,7 +353,8 @@ def snapshot_slurm(queue, req, errors, user):
 def take_snapshot(queue, req, out_dir, job_id=None):
     """Never raises. Returns the snapshot dict and appends it to out_dir/snapshots.jsonl."""
     errors = []
-    snap = {"kind": "snapshot", "ts": int(time.time()), "queue": queue, "errors": errors}
+    snap = {"kind": "snapshot", "ts": int(time.time()), "snap_id": uuid.uuid4().hex[:16], "queue": queue,
+            "shape": shape_key(req), "errors": errors}
     if job_id:
         snap["job_id"] = job_id
     try:
@@ -341,6 +373,33 @@ def take_snapshot(queue, req, out_dir, job_id=None):
         errors.append(f"snapshot: {type(e).__name__}: {e}")
     append(out_dir, "snapshots.jsonl", snap)
     return snap
+
+
+def shape_key(req):
+    keys = ("gpu_num", "gmem_gb", "gmodel", "j_exclusive", "cores", "host_incl", "host_excl")
+    return json.dumps([req.get(k) for k in keys])
+
+
+def recent_snapshot(out_dir, queue, req, max_age=SNAPSHOT_REUSE_S):
+    """The newest snapshot under max_age s old for the same queue and shape, read from the file's tail."""
+    try:
+        with open(os.path.join(out_dir, "snapshots.jsonl"), "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 65536))
+            tail = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    now, shape = time.time(), shape_key(req)
+    for ln in reversed(tail):
+        try:
+            s = json.loads(ln)
+        except ValueError:
+            continue
+        if now - s.get("ts", 0) > max_age:
+            return None
+        if s.get("queue") == queue and s.get("shape") == shape and s.get("snap_id"):
+            return s
+    return None
 
 
 def append(out_dir, name, rec):
@@ -374,39 +433,103 @@ def cmd_snapshot(a):
     return 0
 
 
+def tee(src, dst, buf):
+    """Copy bytes from a pipe to dst as they arrive, unchanged, and keep a copy."""
+    fd = dst.fileno()
+    while True:
+        chunk = os.read(src.fileno(), 65536)
+        if not chunk:
+            break
+        buf.append(chunk)
+        while chunk:
+            chunk = chunk[os.write(fd, chunk):]
+
+
+def job_id_from(out):
+    m = (re.search(r"Job <(\d+)>", out) or re.search(r"Submitted batch job (\d+)", out)
+         or re.match(r"^\s*(\d+)(?:;\S+)?\s*$", out))  # sbatch --parsable
+    return m.group(1) if m else None
+
+
+def is_interactive(cmd):
+    if os.path.basename(cmd[0]) in ("srun", "salloc"):
+        return True
+    return os.path.basename(cmd[0]) == "bsub" and any(x in INTERACTIVE_FLAGS for x in cmd[1:])
+
+
 def cmd_submit(a):
+    global DEADLINE
     cmd = list(a.command)
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
     if not cmd:
         print("pendlog submit: give the command after --", file=sys.stderr)
         return 2
-    stdin_text = sys.stdin.read() if a.stdin_script else None
+    if a.stdin_script and sys.stdin.isatty():
+        print("pendlog submit: --stdin-script needs the job script on stdin (... -- bsub < job.sh)",
+              file=sys.stderr)
+        return 2
+    stdin_bytes = sys.stdin.buffer.read() if a.stdin_script else None
+    stdin_text = stdin_bytes.decode("utf-8", "replace") if stdin_bytes is not None else None
     try:
         # #BSUB lines first: options on the command line override them, as in bsub
         req = parse_request(cmd[:1] + bsub_lines(stdin_text or "") + cmd[1:])
     except Exception as e:
         req = {"parse_error": str(e)}
+    snap = None
     try:
-        snap = take_snapshot(req.get("queue"), req, a.out)
-    except Exception as e:
-        snap = {"errors": [str(e)]}
-    ts = int(time.time())
+        snap = recent_snapshot(a.out, req.get("queue"), req)
+    except Exception:
+        snap = None
+    if snap is None:
+        DEADLINE = time.time() + SUBMIT_SNAPSHOT_BUDGET
+        try:
+            snap = take_snapshot(req.get("queue"), req, a.out)
+        except Exception as e:
+            snap = {"errors": [str(e)]}
+        DEADLINE = None
+    rec = {"kind": "submit", "ts": int(time.time()), "job_id": None, "rc": None,
+           "request_args": cmd + (["<stdin>"] if stdin_bytes is not None else []), "request": req,
+           "snapshot_id": snap.get("snap_id"), "snapshot_ts": snap.get("ts"), "scheduler": snap.get("scheduler")}
+    if is_interactive(cmd) and stdin_bytes is None:
+        rec["interactive"] = True
+        append(a.out, "jobs.jsonl", rec)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        try:
+            os.execvp(cmd[0], cmd)
+        except OSError as e:
+            print(f"pendlog: could not run {cmd[0]}: {e}", file=sys.stderr)
+            return 127
+    out_buf, err_buf = [], []
     try:
-        p = subprocess.run(cmd, input=stdin_text, capture_output=True, text=True)
-        out, err, rc = p.stdout, p.stderr, p.returncode
+        p = subprocess.Popen(cmd, stdin=subprocess.PIPE if stdin_bytes is not None else None,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        threads = [threading.Thread(target=tee, args=(p.stdout, sys.stdout, out_buf)),
+                   threading.Thread(target=tee, args=(p.stderr, sys.stderr, err_buf))]
+        sys.stdout.flush()
+        sys.stderr.flush()
+        for t in threads:
+            t.start()
+        if stdin_bytes is not None:
+            try:
+                p.stdin.write(stdin_bytes)
+                p.stdin.close()
+            except BrokenPipeError:
+                pass
+        for t in threads:
+            t.join()
+        rc = p.wait()
     except OSError as e:
-        out, err, rc = "", f"pendlog: could not run {cmd[0]}: {e}\n", 127
-    sys.stdout.write(out)
-    sys.stderr.write(err)
-    sys.stdout.flush()
-    m = re.search(r"Job <(\d+)>", out) or re.search(r"Submitted batch job (\d+)", out)
+        print(f"pendlog: could not run {cmd[0]}: {e}", file=sys.stderr)
+        rc = 127
+    if rc < 0:
+        rc = 128 - rc  # killed by signal N: 128 + N, as a shell reports it
+    out = b"".join(out_buf).decode("utf-8", "replace")
+    err = b"".join(err_buf).decode("utf-8", "replace")
+    rec.update({"job_id": job_id_from(out), "rc": rc, "submit_output": (out + err).strip()[:500]})
     try:
-        append(a.out, "jobs.jsonl", {
-            "kind": "submit", "ts": ts, "job_id": m.group(1) if m else None, "rc": rc,
-            "request_args": cmd + (["<stdin>"] if stdin_text else []), "request": req,
-            "snapshot_ts": snap.get("ts"), "scheduler": snap.get("scheduler"),
-            "submit_output": (out + err).strip()[:500]})
+        append(a.out, "jobs.jsonl", rec)
     except Exception as e:
         print(f"pendlog: log failed: {e}", file=sys.stderr)
     return rc
@@ -450,7 +573,7 @@ def lsf_status(job_ids, errors):
 
 
 def lsf_bhist(job_id, errors):
-    out = run(["bhist", "-n", "10", "-l", job_id], errors=errors)
+    out = run(["bhist", "-n", "3", "-l", job_id], errors=errors)
     if not out:
         return None
     flat = " ".join(out.split())
@@ -523,7 +646,9 @@ def cmd_started(a):
         o = obs.get(j)
         rec = {"kind": "started", "job_id": j, "ts": now}
         if o is None:
-            rec.update({"final": False, "error": "not found by bjobs or bhist"})
+            tries = 1 + sum(1 for x in seen.get(j, []) if x.get("error"))
+            rec.update({"final": tries >= 2, "unknown": tries >= 2, "tries": tries,
+                        "error": "not found by bjobs or bhist"})
         else:
             terminal = all(s in ("DONE", "EXIT", "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT") for s in o["stats"])
             pend = o["pend_s"]
@@ -549,14 +674,16 @@ EXPORT_COLS = ["job_id", "submit_ts", "submit_utc", "queue", "cores", "mem_mb", 
 
 def cmd_export(a):
     submits, seen = job_events(a.out)
-    snaps = {s.get("ts"): s for s in read_jsonl(os.path.join(a.out, "snapshots.jsonl"))}
+    snaps = {}
+    for x in read_jsonl(os.path.join(a.out, "snapshots.jsonl")):
+        snaps[x.get("snap_id") or ("ts", x.get("ts"))] = x
     w = csv.DictWriter(sys.stdout, fieldnames=EXPORT_COLS, lineterminator="\n")
     w.writeheader()
     for jid, s in sorted(submits.items(), key=lambda kv: kv[1].get("ts", 0)):
         if s.get("rc") != 0:
             continue
         req = s.get("request") or {}
-        snap = snaps.get(s.get("snapshot_ts")) or {}
+        snap = snaps.get(s.get("snapshot_id") or ("ts", s.get("snapshot_ts"))) or {}
         obs = seen.get(jid, [])
         st = next((o for o in obs if o.get("started")), None)
         last = obs[-1] if obs else {}
