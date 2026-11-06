@@ -31,9 +31,11 @@ For Nextflow, read `-with-trace` (`%cpu`, `peak_rss`, `realtime`). For GPUs, sam
 - **CPU efficiency** = CPU time / (wall time x cores). Below 0.5, the job asked for too many cores, or the
   tool's thread flag does not match `-n`. Fix the flag first, then set `-n` to the cores it really uses.
   A "2-thread" tool that uses 1.05 cores gets 1 core.
-- **Cores on a busy cluster**: GPU hosts often have free GPUs but no free cores, so `-n` decides the wait.
-  Set `-n` to the pilot's measured busy cores, rounded up, plus one (8.5 busy cores: `-n 10`, not 16). Jobs
-  that asked for 12 to 16 cores while using 4 to 8.5 pended 13 to 29 min longer.
+- **Cores on a busy cluster**: set `-n` to the pilot's measured busy cores, rounded up, plus one (8.5 busy
+  cores: `-n 10`, not 16). Extra cores are waste either way. They lengthen the wait when the few hosts that fit
+  the GPU request have free GPUs but no free cores (jobs asking 12 to 16 cores while using 4 to 8.5 pended 13 to
+  29 min longer). Across many jobs, though, core count had no average effect on waits: GPU memory and model pins
+  matter more (see "Wait risk" below).
 - **Memory**: `-M` is about 1.3 x measured peak, rounded up to the next 500 MB. Peak is what the scheduler
   counts (cgroup RSS), not page cache.
 - **Variable inputs**: fit peak against input size and scale the request per input, or retry with more

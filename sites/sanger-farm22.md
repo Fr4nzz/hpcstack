@@ -53,8 +53,8 @@ reflects the largest hosts and queues. Check GPU host groups with `bqueues -l gp
   a modest floor such as 16G. GPUs are shared between jobs here unless you ask for exclusive mode, so another
   job can already hold most of a GPU's memory: a plain `num=1` job ran out of memory at model load on a GPU
   where another process held 76 GB. Check the smallest GPU the queue reaches with `lshosts -gpu`.
-- When GPU hosts are busy, free GPUs often have no free cores next to them, so `-n` decides the wait. Ask
-  for the measured busy cores plus one (`right-size-jobs`).
+- Ask for the measured busy cores plus one (`right-size-jobs`). When the few hosts that fit a large GPU
+  request are short of cores, `-n` lengthens the wait. On average, GPU memory above 32G mattered far more.
 - "Affinity ... not enough processor units" here also appears when the `gmem` filter or a full queue is the
   real block. Diagnose it as in `cluster-ops/references/lsf.md` ("Why pending") before cutting cores.
 
