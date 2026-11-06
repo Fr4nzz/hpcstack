@@ -119,7 +119,8 @@ Before deleting data, see `storage-footprint`: the source data of a trained or d
 
 If the cluster uses short-lived certificates (Teleport, OIDC, Kerberos), read the real validity (`tsh status`,
 `klist`) instead of assuming it: on one site it was 8 h, not the 12 h the notes said, and it expired three times
-in 27 h. Renew before a long wait or handoff when a watched job will end after the certificate does. Expiry
+in 27 h. Renew before a long wait or handoff when a watched job will end after the certificate does, or make sure an
+expiry warning is armed when it will end more than one certificate lifetime away. Expiry
 blinds monitoring but does not kill jobs. Re-authenticate before deciding anything about job state, then
 re-check every watched job (`references/monitoring.md`).
 

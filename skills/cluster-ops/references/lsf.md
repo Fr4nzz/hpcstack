@@ -44,7 +44,7 @@ bjobs -l <id>                                    # RESOURCE USAGE, pending reaso
 bjobs -p -l <id>                                 # why pending
 bhist -l <id>                                    # timeline including pend time
 bacct -l <id>                                    # finished jobs (can be slow, avoid wide time ranges)
-bhist -n 10 -l <id>                              # purged jobs: searches older event files (10-30 s)
+bhist -n 10 -l <id>                              # purged jobs: searches older event files (timeout 120)
 bpeek <id>                                       # stdout so far
 ```
 

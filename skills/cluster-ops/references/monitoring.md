@@ -21,7 +21,7 @@ Good: one background watcher that polls every 60 s and exits on a terminal state
 
 ```bash
 # LSF. UNTIL=RUN before a long handoff. Over ssh, put the ssh command inside the timeout.
-J=1234; UNTIL=END
+J=1234; UNTIL=END; CAP=1500   # CAP + 60 s sleep + 60 s query must stay under the tool timeout
 t0=$(date +%s)
 while :; do
   rc=0; r=$(timeout 60 bjobs -noheader -o stat "$J" 2>&1) || rc=$?; s=${r##*$'\n'}   # survives set -e
@@ -33,10 +33,11 @@ while :; do
     ZOMBI) echo ZOMBI; break ;;   # a kill LSF could not confirm: report once, read bacct
     *) if [[ $r == *"is not found"* ]]; then echo GONE; else echo "ERROR rc=$rc: $r"; fi; break ;;
   esac
+  (( $(date +%s) - t0 > CAP )) && { echo "CAP_REACHED last=$s"; break; }
   sleep 60
 done
 # SLURM, same shape
-J=1234; UNTIL=END; t0=$(date +%s)
+J=1234; UNTIL=END; CAP=1500; t0=$(date +%s)
 while :; do
   rc=0; r=$(timeout 60 sacct -n -X -P -j "$J" -o State 2>&1) || rc=$?; s=${r%%$'\n'*}; s=${s%% *}
   case $s in
@@ -45,6 +46,7 @@ while :; do
     PENDING) (( $(date +%s) - t0 > 1800 )) && { echo PEND_30MIN; break; } ;;
     *) echo "ERROR rc=$rc: $r"; break ;;   # empty reply or error is not a state
   esac
+  (( $(date +%s) - t0 > CAP )) && { echo "CAP_REACHED last=$s"; break; }
   sleep 60
 done
 ```
@@ -54,9 +56,11 @@ What the output means:
 - `DONE`, `EXIT`, or `GONE` (a confirmed "is not found": finished and purged) are news, not verdicts. Read
   `status.json`, the log and `bacct` (see "When it ends").
 - `PEND_30MIN`: report the pending reason from `bjobs -p -l` (`lsf.md`, "Why pending"). If the request is
-  over-strict, fix it. Otherwise hand off anyway (state file and job file, with the reason in the handoff) or
+  over-strict, fix it. Otherwise hand off anyway (state file and job file, with the pending reason sent to whoever must act) or
   re-run the `UNTIL=RUN` loop and say so. Never leave a pending job with no handoff.
 - `ZOMBI`: report once and read `bacct`. Don't re-run the loop on it.
+- `CAP_REACHED`: the loop hit its own limit before the job changed state. Not news about the job: hand off
+  (state file and job file) or run the loop again in a new tool call.
 - `ERROR` (timeout, authentication or transport failure, or an empty reply) is not a job state. The job stays
   tracked. Check authentication first (an expired certificate does not kill jobs), then run the loop again.
 - A `status.json` or checkpoint that stopped advancing while the job is RUN means a helper died or the job
