@@ -27,6 +27,10 @@ anything over a minute of CPU go in a job. See `storage-footprint` for disk ques
   `safe-interactive` (`hpc-session` plus a short `-W`). An interactive allocation without both is a bug.
 - **Everything that runs longer than you are guaranteed to be watching is a batch job** (or a task in a
   worker queue, see `cluster-autoresearch`). Batch jobs end on their own when the agent stops.
+- **Local GPU or cluster: pick the one that finishes first.** For a GPU step over about 15 min, compare the
+  recent PEND for the same request (`right-size-jobs`: `pend-risk` or `pendlog export`) plus the cluster runtime
+  and any upload with the local GPU's measured time. Take the faster, and say which and why. A quiet queue can
+  start a single-GPU job in minutes while a local run takes much longer.
 
 ## Submitting
 
