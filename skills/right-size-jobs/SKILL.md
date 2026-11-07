@@ -85,7 +85,8 @@ What the request does change is the risk:
   about +10 points of over-1-h risk, but from only 17 jobs and not significant. Drop a pin the job doesn't need.
 
 Submit through `scripts/pendlog submit --out DIR -- bsub ...` so the data grows, and schedule
-`scripts/pendlog started --out DIR` every 10 to 15 min while jobs pend. Before a wave, run
+`scripts/pendlog started --out DIR` every 10 to 15 min while jobs pend (or from a wait loop: it re-checks a
+job at most every 10 min). Before a wave, run
 `scripts/pend-risk --history jobs.csv --request "<bsub args>"` on `pendlog export` output or an accounting
 CSV. It prints how often similar recent jobs waited over 1 h, never an ETA. Both are UNTESTED on a cluster.
 

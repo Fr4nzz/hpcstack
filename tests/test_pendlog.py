@@ -195,13 +195,13 @@ def started_setup(lsf):
                   "PEND_REASON": "Job's requirements for resource reservation not satisfied: 4 hosts;"}],
         "4243": [{"JOBID": "4243", "STAT": "PEND", "START_TIME": "", "PEND_TIME": "800", "PEND_REASON": ""}],
         "4244": [{"JOBID": "4244", "STAT": "PEND", "START_TIME": "", "PEND_TIME": "800", "PEND_REASON": ""}]})
-    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))
+    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]), "--every", "0")
     set_state(lsf, jobs={
         "4242": [{"JOBID": "4242", "STAT": "RUN", "START_TIME": "Nov  6 10:42", "PEND_TIME": "1500",
                   "PEND_REASON": ""}],
         "4243": [{"JOBID": "4243", "STAT": "PEND", "START_TIME": "", "PEND_TIME": "1600",
                   "PEND_REASON": "Not enough GPUs: 3 hosts;"}]})
-    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))  # 4244 is purged: bhist fallback
+    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]), "--every", "0")  # 4244 is purged: bhist fallback
 
 
 def test_started_fills_start_and_pend(lsf):
@@ -214,7 +214,7 @@ def test_started_fills_start_and_pend(lsf):
     assert last["4244"]["source"] == "bhist" and last["4244"]["pend_s"] == 5000 and last["4244"]["started"]
     # a third run only looks at the job still pending
     n = len(ev)
-    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))
+    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]), "--every", "0")
     ev2 = [e for e in jsonl(lsf["out"] / "jobs.jsonl") if e["kind"] == "started"]
     assert [e["job_id"] for e in ev2[n:]] == ["4243"]
 
@@ -422,7 +422,7 @@ def test_lost_job_stops_after_two_tries(lsf):  # O4
     submit(lsf, "bsub", "-q", "gpu", "x")
     set_state(lsf, bhist_none=True)
     for _ in range(3):
-        run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))
+        run(lsf, PENDLOG, "started", "--out", str(lsf["out"]), "--every", "0")
     ev = [e for e in jsonl(lsf["out"] / "jobs.jsonl") if e["kind"] == "started"]
     assert [e["final"] for e in ev] == [False, True] and ev[-1]["unknown"]
     args = (lsf["state"].parent / "state.json.bhist_args").read_text().splitlines()
@@ -483,12 +483,12 @@ def test_outage_does_not_close_job(lsf):  # R2-O1
     submit(lsf, "bsub", "-q", "gpu", "x")
     set_state(lsf, bjobs_fail=True, bhist_none=True)
     for _ in range(2):
-        run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))
+        run(lsf, PENDLOG, "started", "--out", str(lsf["out"]), "--every", "0")
     ev = [e for e in jsonl(lsf["out"] / "jobs.jsonl") if e["kind"] == "started"]
     assert [(e["final"], e["tries"], e["error"]) for e in ev] == [(False, 0, "scheduler unavailable")] * 2
     set_state(lsf, bjobs_fail=False, jobs={"4242": [{"JOBID": "4242", "STAT": "PEND", "START_TIME": "",
                                                      "PEND_TIME": "900", "PEND_REASON": ""}]})
-    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))
+    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]), "--every", "0")
     last = jsonl(lsf["out"] / "jobs.jsonl")[-1]
     assert last["pend_s"] == 900 and not last["final"]
 
@@ -556,9 +556,9 @@ def test_export_keeps_pend_after_outage_record(lsf):  # R3-O1
     submit(lsf, "bsub", "-q", "gpu", "x")
     set_state(lsf, jobs={"4242": [{"JOBID": "4242", "STAT": "PEND", "START_TIME": "",
                                    "PEND_TIME": "900", "PEND_REASON": ""}]})
-    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))
+    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]), "--every", "0")
     set_state(lsf, bjobs_fail=True, bhist_none=True)
-    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))  # last record is now the outage one
+    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]), "--every", "0")  # last record is now the outage one
     rows = list(csv.DictReader(io.StringIO(run(lsf, PENDLOG, "export", "--out", str(lsf["out"])).stdout)))
     assert rows[0]["pend_s"] == "900" and rows[0]["last_stat"] == "PEND"
 
@@ -601,3 +601,16 @@ def test_parse_error_still_detects_interactive():  # R3-O4
     mod = _load_pendlog()
     assert mod.is_interactive(["bsub", "-Is", "bash"], {"parse_error": "x"})
     assert not mod.is_interactive(["bsub", "-q", "gpu", "python", "-I"], {"parse_error": "x"})
+
+
+def test_started_skips_jobs_checked_recently(lsf):
+    set_state(lsf, next_id=5150)
+    run(lsf, PENDLOG, "submit", "--out", str(lsf["out"]), "--", "bsub", "-q", "gpu", "x")
+    set_state(lsf, jobs={"5150": [{"JOBID": "5150", "STAT": "PEND", "START_TIME": "", "PEND_TIME": "30",
+                                   "PEND_REASON": ""}]})
+    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))  # never checked: checked now
+    r = run(lsf, PENDLOG, "started", "--out", str(lsf["out"]))  # checked seconds ago: skipped
+    ev = [e for e in jsonl(lsf["out"] / "jobs.jsonl") if e["kind"] == "started"]
+    assert len(ev) == 1 and "all checked in the last 600 s" in r.stdout
+    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]), "--every", "0")
+    assert len([e for e in jsonl(lsf["out"] / "jobs.jsonl") if e["kind"] == "started"]) == 2

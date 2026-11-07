@@ -60,7 +60,8 @@ What the output means:
   act). Re-run it only as a foreground loop in the same turn, never as a new background loop. Never leave a
   pending job with no handoff.
 - Pending jobs submitted through `pendlog submit` (`right-size-jobs`): run `pendlog started --out DIR` every
-  10 to 15 min, or from the wait loop, so their start, PEND and pending reason are logged.
+  10 to 15 min, or from the wait loop (it re-checks a job at most every 10 min), so their start, PEND and
+  pending reason are logged.
 - `ZOMBI`: report once and read `bacct`. Don't re-run the loop on it.
 - `CAP_REACHED`: the loop hit its own limit before the job changed state. Not news about the job: hand off
   (state file and job file for a watcher). Don't start another background loop: each restart is one more turn end,

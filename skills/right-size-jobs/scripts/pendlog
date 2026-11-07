@@ -7,7 +7,7 @@ LSF first. SLURM paths (squeue, sinfo, sshare, sacct, sbatch) are thinner and un
 Usage:
   pendlog snapshot --queue Q [--hosts-from-request "<bsub -R/-gpu/-n args>"] --out DIR
   pendlog submit --out DIR [--stdin-script] -- bsub <args...>
-  pendlog started --out DIR [--since H]
+  pendlog started --out DIR [--since H] [--every S]
   pendlog export --out DIR > jobs.csv
 
 snapshot  Runs light commands only, each with a timeout (--timeout, default 20 s): `bqueues Q`,
@@ -32,7 +32,8 @@ started   For logged jobs with no start yet (submitted in the last --since hours
           final, as unknown; a failed or timed-out command logs "scheduler unavailable" and is no try). Appends one line per job to DIR/jobs.jsonl. Schedule it
           every 10 to 15 min while jobs pend, or call it from a wait loop.
           A job is checked until a run records its start or end, then never again, so its start shows in
-          `export`, not in later summaries.
+          `export`, not in later summaries. A job checked less than --every seconds ago (default 600) is
+          skipped, so calling it from a 1-min wait loop costs one bjobs call per 10 min per job.
 export    One CSV row per logged job: the request, the snapshot at submit, PEND seconds and the last
           pending reason. Feed it to `pend-risk --history`.
 
@@ -676,6 +677,16 @@ def cmd_started(a):
     if not todo:
         print("pendlog started: no logged jobs waiting for a start")
         return 0
+    # PEND seconds come from the scheduler's own counter at the start, so checking more often adds nothing:
+    # a job checked within --every seconds is skipped (a wait loop may call this every minute).
+    waiting = len(todo)
+    todo = [j for j in todo if now - max((o.get("ts", 0) for o in seen.get(j, [])), default=0) >= a.every]
+    skipped = waiting - len(todo)
+    done = sum(1 for j in submits if any(o.get("final") for o in seen.get(j, [])))
+    if not todo:
+        print(f"pendlog started: {waiting} jobs had no start recorded, all checked in the last {a.every:g} s"
+              f" ({done} recorded on earlier runs)")
+        return 0
     errors = []
     sched = scheduler()
     answered = {}  # job -> did the scheduler answer about it (found, or said it doesn't know it)
@@ -714,9 +725,8 @@ def cmd_started(a):
         if errors:
             rec["errors"] = errors[:5]
         append(a.out, "jobs.jsonl", rec)
-    done = sum(1 for j in submits if j not in todo and any(o.get("final") for o in seen.get(j, [])))
-    print(f"pendlog started: {len(todo)} jobs had no start recorded, {n_started} of them started now"
-          f" ({done} recorded on earlier runs)")
+    print(f"pendlog started: {waiting} jobs had no start recorded, {len(todo)} checked now, {n_started} of them"
+          f" started ({skipped} checked in the last {a.every:g} s, {done} recorded on earlier runs)")
     return 0
 
 
@@ -780,6 +790,8 @@ def main(argv=None):
     p = sub.add_parser("started")
     p.add_argument("--out", required=True)
     p.add_argument("--since", type=float, default=72, help="hours back to look (default 72)")
+    p.add_argument("--every", type=float, default=600,
+                   help="skip jobs checked less than this many seconds ago (default 600)")
     p = sub.add_parser("export")
     p.add_argument("--out", required=True)
     a = ap.parse_args(argv)
