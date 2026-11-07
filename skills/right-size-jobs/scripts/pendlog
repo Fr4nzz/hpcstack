@@ -31,6 +31,8 @@ started   For logged jobs with no start yet (submitted in the last --since hours
           back to `bhist -n 3 -l` for purged jobs (a job that neither knows in 2 tries is marked
           final, as unknown; a failed or timed-out command logs "scheduler unavailable" and is no try). Appends one line per job to DIR/jobs.jsonl. Schedule it
           every 10 to 15 min while jobs pend, or call it from a wait loop.
+          A job is checked until a run records its start or end, then never again, so its start shows in
+          `export`, not in later summaries.
 export    One CSV row per logged job: the request, the snapshot at submit, PEND seconds and the last
           pending reason. Feed it to `pend-risk --history`.
 
@@ -712,7 +714,9 @@ def cmd_started(a):
         if errors:
             rec["errors"] = errors[:5]
         append(a.out, "jobs.jsonl", rec)
-    print(f"pendlog started: checked {len(todo)} jobs, {n_started} started")
+    done = sum(1 for j in submits if j not in todo and any(o.get("final") for o in seen.get(j, [])))
+    print(f"pendlog started: {len(todo)} jobs had no start recorded, {n_started} of them started now"
+          f" ({done} recorded on earlier runs)")
     return 0
 
 
