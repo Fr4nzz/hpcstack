@@ -100,9 +100,11 @@ Version 0.1. The skills come from real use, but the helper scripts are new:
 - `jobeff` and `quota_report.sh` were run against live LSF and Lustre. `queue_worker.py` ran LSF batch
   workers: failing, timed-out and crashing tasks were recorded without stopping the queue, the worker exited
   0 and its `done()` dependent ran. A worker signalled with USR2 exited 140, so its `done()` dependent never
-  fired. Several workers sharing one queue are not yet tested. Its priorities and `preempt` (stop one of
-  your own running tasks, re-queue it with a resume command, and run a high-priority task in the same
-  allocation) are tested on synthetic tasks only (`tests/test_queue_worker.py`), not yet on a cluster.
+  fired. Several workers sharing one queue are not yet tested. `preempt` (stop one of your own running
+  tasks, re-queue it with a resume command, and run a high-priority task in the same allocation), the idle
+  exit, STOP, `bkill` and `bkill -s USR2` were tested on LSF farm22 on 7 Nov 2026, one worker per scenario.
+  Resuming a stopped task on the next worker, the USR2 grace and the `--est-min` fit check that followed
+  from that test are tested on synthetic tasks only (`tests/test_queue_worker.py`).
 - `pendlog` (queue snapshots and PEND times at submit) and `pend-risk` (share of similar recent jobs that
   waited over 1 h, no ETA) are UNTESTED on a cluster: tested with fake LSF commands and synthetic histories
   only (`tests/test_pendlog.py`). Their SLURM paths are untested.

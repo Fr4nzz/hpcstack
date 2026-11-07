@@ -113,7 +113,8 @@ def test_preempt_running_task_resumes_after_high_task(env):
     assert "worker time left" in r.stdout and "unknown" not in r.stdout
     assert (env / "q" / "preempt" / "long.json").exists()
     st = qw(env, "status", "--queue", "q").stdout
-    assert "open preempt request: long" in st
+    # the worker polls every 0.2 s, so it may already have acted on the request
+    assert "open preempt request: long" in st or (env / "q" / "preempt.log").exists(), st
     rc, out = finish(w)
     assert rc == 0, out
     # same worker: the checkpoint is written, the high task runs next, then the resume, then the normal task
@@ -237,8 +238,8 @@ def test_old_queue_without_priority_fields(env):
     assert order(env) == ["new_high:quick", "o1:quick", "o2:quick"]
 
 
-@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGUSR2])
-def test_worker_signal_still_stops_everything(env, sig):
+@pytest.mark.parametrize("sig,grace", [(signal.SIGTERM, "30"), (signal.SIGUSR2, "3")])
+def test_worker_signal_stops_everything_and_requeues_a_resumable_task(env, sig, grace):
     add(env, "long", "train", "--resume-cmd", f"{sys.executable} fake_task.py long resume")
     add(env, "next", "quick")
     w = start_worker(env)
@@ -246,11 +247,30 @@ def test_worker_signal_still_stops_everything(env, sig):
     w.send_signal(sig)
     rc, out = finish(w)
     assert rc == 128 + sig, out
-    assert result(env, "long")["status"] == "interrupted"
+    r = result(env, "long")
+    assert r["status"] == "interrupted" and r["requeued"] is True
     assert not (env / "q" / "preempt.log").exists()
-    assert order(env) == ["long:train"]  # not re-queued, nothing else claimed
+    assert order(env) == ["long:train"]  # nothing else claimed by this worker
+    assert f"grace {grace} s" in (env / "q" / "logs" / "long.log").read_text()  # USR2 gets --preempt-grace
     st = qw(env, "status", "--queue", "q").stdout
-    assert "next\tnormal\tpreempts=0\tqueued" in st
+    assert "long\tnormal\tpreempts=0\tqueued (resume)" in st and "next\tnormal\tpreempts=0\tqueued" in st
+    line = json.loads((env / "q" / "requeue.log").read_text())
+    assert line["kind"] == "stop" and line["stop_requeues"] == 1
+    rc, out = finish(start_worker(env))  # the next worker resumes it first, then runs the rest
+    assert rc == 0, out
+    assert order(env) == ["long:train", "long:resume", "next:quick"]
+    assert (env / "long.resumed").read_text() == "epoch=3"
+
+
+def test_worker_signal_without_resume_cmd_is_not_requeued(env):
+    add(env, "long", "train")
+    w = start_worker(env)
+    wait_for(env / "long.running")
+    w.send_signal(signal.SIGTERM)
+    rc, out = finish(w)
+    assert rc == 128 + signal.SIGTERM, out
+    assert "requeued" not in result(env, "long")
+    assert not (env / "q" / "requeue.log").exists()
 
 
 # --- in-process tests of single behaviours (round 1 review fixes) ---
@@ -423,3 +443,126 @@ def test_stale_request_cleanup_does_not_delete_fresh_request(qwm, tmp_path, monk
     assert state["done"]
     assert req is not None and req["attempt"] == 1 and req["reason"] == "fresh"
     assert json.loads((q / "preempt" / "x.json").read_text())["attempt"] == 1
+
+
+def test_max_hours_cut_requeues_but_own_timeout_does_not(qwm, tmp_path):
+    q = tmp_path / "q"
+    t = claimed_task(qwm, q, resume_cmd=["true"])
+    r = qwm.run_task(str(q), t, "w", time.time() + 0.5, {"preempt_grace": 1.0, "preempt_poll_s": 0.05})
+    assert r["status"] == "timeout" and r["requeued"] is True
+    latest, _ = qwm.queue_state(str(q))
+    assert latest["x"]["attempt"] == 1 and latest["x"]["cmd"] == ["true"] and latest["x"]["front"] is True
+    q2 = tmp_path / "q2"
+    t2 = claimed_task(qwm, q2, resume_cmd=["true"], timeout_min=0.01)  # its own limit, before the worker's
+    r2 = qwm.run_task(str(q2), t2, "w", time.time() + 3600, {"preempt_grace": 1.0, "preempt_poll_s": 0.05})
+    assert r2["status"] == "timeout" and "requeued" not in r2
+    assert not (q2 / "requeue.log").exists()
+
+
+def test_stop_requeues_are_capped(qwm):
+    t = {"id": "x", "cmd": ["a"], "resume_cmd": ["b"], "stop_requeues": qwm.MAX_STOP_REQUEUES}
+    assert qwm.stop_requeue(t, "w", "r", 1.0) is None
+    t["stop_requeues"] = qwm.MAX_STOP_REQUEUES - 1
+    new, line = qwm.stop_requeue(t, "w", "r", 1.0)
+    assert new["stop_requeues"] == qwm.MAX_STOP_REQUEUES and new.get("preempts", 0) == 0
+    assert qwm.stop_requeue({"id": "y", "cmd": ["a"]}, "w", "r", 1.0) is None  # no resume command
+
+
+def test_claim_leaves_a_task_that_does_not_fit_for_a_fresher_worker(qwm, tmp_path):
+    q = tmp_path / "q"
+    q.mkdir()
+    for tid, est in (("big", 600), ("small", 30)):
+        qwm.append_jsonl(str(q / "queue.jsonl"), {"id": tid, "cmd": ["true"], "priority": "normal", "est_min": est})
+    span = 12 * 3600  # --max-hours 12: "big" fits a fresh worker
+    skipped = []
+    t = qwm.claim(str(q), "w", time.time() + 2 * 3600, 1, skipped, span=span)
+    assert t["id"] == "small" and skipped == ["big"]
+    assert qwm.claim(str(q), "w2", time.time() + 11 * 3600, 1, span=span)["id"] == "big"
+    # a resumed attempt needs only what is left of its estimate
+    qwm.append_jsonl(str(q / "queue.jsonl"), {"id": "res", "cmd": ["true"], "priority": "normal", "est_min": 600,
+                                              "resume_cmd": ["true"], "attempt": 1, "prior_runtime_s": 540 * 60})
+    assert qwm.claim(str(q), "w3", time.time() + 2 * 3600, 1, span=span)["id"] == "res"
+    # longer than any worker: runs anyway, it resumes across workers
+    qwm.append_jsonl(str(q / "queue.jsonl"), {"id": "huge", "cmd": ["true"], "priority": "normal", "est_min": 900})
+    skipped = []
+    assert qwm.claim(str(q), "w4", time.time() + 2 * 3600, 1, skipped, span=7.5 * 3600)["id"] == "huge"
+    assert skipped == []
+
+
+def test_signal_during_max_hours_grace_still_requeues(qwm, tmp_path, monkeypatch):
+    q = tmp_path / "q"
+    t = claimed_task(qwm, q, resume_cmd=["true"])
+    real_stop = qwm.stop_group
+    calls = []
+
+    def stop_then_signal(proc, sig=signal.SIGTERM, grace=30.0):
+        calls.append(grace)
+        if len(calls) == 1:
+            raise qwm.Interrupted(signal.SIGTERM)  # bkill arrives during the checkpoint grace
+        return real_stop(proc, sig, 1.0)
+
+    monkeypatch.setattr(qwm, "stop_group", stop_then_signal)
+    with pytest.raises(qwm.Interrupted):
+        qwm.run_task(str(q), t, "w", time.time() + 0.5 + 5.0, {"preempt_grace": 5.0, "preempt_poll_s": 0.05})
+    r = json.loads((q / "results" / "x.json").read_text())
+    assert r["status"] == "timeout" and r["requeued"] is True and r["returncode"] is not None
+    assert calls == [5.0, 30.0]
+    latest, _ = qwm.queue_state(str(q))
+    assert latest["x"]["attempt"] == 1
+    assert len(qwm.read_jsonl(str(q / "queue.jsonl"))) == 2  # re-queued once, not twice
+
+
+def test_signal_before_the_task_starts_requeues_a_resumable_task(env):
+    add(env, "long", "train", "--resume-cmd", f"{sys.executable} fake_task.py long resume")
+    qwm = load_module()
+    t = qwm.claim(str(env / "q"), "w", time.time() + 3600, 1)
+
+    class A:
+        queue = str(env / "q")
+        preempt_signal, preempt_grace, preempt_poll_s, max_hours, idle_min, poll_s = signal.SIGTERM, 1.0, 0.2, 1.0, 0.03, 0.2
+
+    def boom(*args, **kw):
+        raise qwm.Interrupted(signal.SIGUSR2)
+
+    qwm.run_task, qwm.claim = boom, lambda *a, **k: t
+    with pytest.raises(qwm.Interrupted):
+        qwm._drain(A, qwm.paths(A.queue), "w", time.time() + 3600, time.time())
+    r = result(env, "long")
+    assert r["status"] == "interrupted" and r["requeued"] is True
+    assert "resume" in " ".join(json.loads((env / "q" / "queue.jsonl").read_text().splitlines()[-1])["cmd"])
+
+
+def test_requeued_attempt_waits_while_its_predecessor_is_stopping(qwm, tmp_path):
+    q = tmp_path / "q"
+    t = claimed_task(qwm, q, resume_cmd=["true"])
+    new, line = qwm.stop_requeue(t, "w", "signal", 1.0)
+    new["not_before"] = time.time() + 60
+    qwm.publish_result(str(q), t, {"id": "x", "status": "interrupted", "attempt": 0, "stopping": True,
+                                   "returncode": None, "runtime_s": 1.0}, (new, line))
+    assert qwm.claim(str(q), "w2") is None  # attempt 0 is still checkpointing
+    qwm.publish_result(str(q), t, {"id": "x", "status": "interrupted", "attempt": 0, "returncode": 143,
+                                   "runtime_s": 3.0, "requeued": True})
+    assert qwm.claim(str(q), "w2")["attempt"] == 1  # its final result is in: the resume may start
+
+
+def test_late_update_never_replaces_a_later_attempt(qwm, tmp_path):
+    q = tmp_path / "q"
+    t = claimed_task(qwm, q, resume_cmd=["true"])
+    qwm.write_json(str(q / "results" / "x.json"), {"id": "x", "status": "done", "attempt": 1, "returncode": 0})
+    qwm.write_json(str(q / "preempt" / "x.json"), {"task": "x", "attempt": 1, "reason": "r", "time": "t"})
+    qwm.publish_result(str(q), t, {"id": "x", "status": "interrupted", "attempt": 0, "returncode": 143,
+                                   "runtime_s": 3.0})
+    assert json.loads((q / "results" / "x.json").read_text())["attempt"] == 1
+    assert (q / "preempt" / "x.json").exists()
+
+
+def test_hold_expires_when_the_predecessor_was_killed_mid_grace(qwm, tmp_path):
+    q = tmp_path / "q"
+    t = claimed_task(qwm, q, resume_cmd=["true"])
+    new, line = qwm.stop_requeue(t, "w", "signal", 1.0)
+    new["not_before"] = time.time() - 1  # the worker was KILLed: "stopping" stays in its result
+    qwm.publish_result(str(q), t, {"id": "x", "status": "interrupted", "attempt": 0, "stopping": True,
+                                   "returncode": None, "runtime_s": 1.0}, (new, line))
+    got = qwm.claim(str(q), "w2")
+    assert got["attempt"] == 1
+    assert "not_before" not in qwm.stop_requeue(got, "w2", "again", 1.0)[0]

@@ -11,7 +11,7 @@ or when a STOP file appears. If the agent dies, the workers finish the queue and
                           [--preempt-signal TERM] [--preempt-grace 120] [--preempt-poll-s 10]
   queue_worker.py preempt --queue Q --task ID --reason "why the new work is worth more"
   queue_worker.py status  --queue Q
-  touch Q/STOP           workers finish their current task and exit
+  touch Q/STOP           workers finish their current task and exit (remove it before the next worker starts)
 
 Layout of Q: queue.jsonl (tasks), claims.jsonl (who took what), results/<id>.json, logs/<id>.log,
 preempt/<id>.json (open preempt requests), preempt.log (one line per preemption), .lock. A task's command
@@ -19,9 +19,21 @@ runs with cwd = the directory `add` was called from, in its own session, so the 
 killed on timeout. Tasks are claimed once. Re-queue a crashed task with a new id.
 
 Priority: `claim` takes high before normal, first in first out within each priority. Old queue lines
-without a priority count as normal.
+without a priority count as normal. A task whose --est-min (less the runtime of the attempts it resumes)
+fits a fresh worker but not this worker's time left is skipped with a log line and left for a fresher
+worker. A task longer than any worker runs anyway, and resumes across workers if it has --resume-cmd.
+A resume published while its predecessor still checkpoints waits (at most that grace + 5 s) until the
+predecessor's final result is in. Meanwhile workers take the next task.
 
-Repurposable slot (UNTESTED on a cluster, tested on synthetic tasks only): `preempt` writes a request
+Resume after a stop: a task with --resume-cmd that the worker stops (a signal, or --max-hours reached) is
+recorded "interrupted" or "timeout" with "requeued": true and goes back to the front of its priority (high
+tasks included) as the next attempt, which runs its --resume-cmd on the next worker on the queue (one line
+in requeue.log). Submit a worker if none is left. At most 5 such resumes per task, counted apart from
+preemptions (`status` shows stops=N). A task cut by its own --timeout-min, or one without --resume-cmd, is
+not re-queued. A --max-hours cut comes --preempt-grace before the deadline, so the checkpoint ends by it,
+and no task is claimed in the last --preempt-grace + 60 s.
+
+Repurposable slot (tested on LSF farm22, 7 Nov 2026, one worker per scenario, and on synthetic tasks): `preempt` writes a request
 file and signals nothing. The worker that runs the task checks for it every --preempt-poll-s seconds,
 sends the task's process group --preempt-signal so it can checkpoint and exit, waits --preempt-grace
 seconds for every process in the group (not only the leader), then KILLs the group. The grace is capped
@@ -38,7 +50,12 @@ Exit codes of `run`: 0 when the worker stopped normally (idle, max-hours, STOP),
 own results (read results/<id>.json). 128+N when signal N stopped it (bkill, scancel, the walltime warning
 sent by `bsub -wa USR2` or `sbatch --signal`): the running task's process group is stopped first and its
 result is written as "interrupted", so `done(<job>)` dependents do not fire on a half-drained queue.
-A signal to the worker always means "stop everything". It is never a preemption.
+A signal to the worker always means "stop everything". It is never a preemption. The task gets
+--preempt-signal with --preempt-grace after USR2 (the walltime warning: keep the grace below -wt), and
+30 s after any other signal. The result and its re-queue are written before that grace, because bkill
+follows its TERM with KILL after the site's terminate interval (often 10 s), which may end the worker
+first. The task never gets LSF's signals directly (it runs in its own session), so this forwarding is all
+it gets.
 Exit codes of `preempt`: 0 request written, 1 refused (task not running, unknown, or preempted twice),
 2 no or empty --reason.
 """
@@ -56,6 +73,7 @@ import time
 from contextlib import contextmanager
 
 MAX_PREEMPTS = 2
+MAX_STOP_REQUEUES = 5  # resumes after the worker stopped a task (signal or --max-hours), counted apart from preempts
 PRIORITY_RANK = {"high": 0, "normal": 1}
 
 
@@ -63,7 +81,7 @@ def paths(q):
     return {k: os.path.join(q, v) for k, v in
             {"queue": "queue.jsonl", "claims": "claims.jsonl", "lock": ".lock", "stop": "STOP",
              "results": "results", "logs": "logs", "preempt": "preempt",
-             "preempt_log": "preempt.log"}.items()}
+             "preempt_log": "preempt.log", "requeue_log": "requeue.log"}.items()}
 
 
 @contextmanager
@@ -242,12 +260,43 @@ def cmd_add(a):
     print(f"queued {a.id} ({a.priority}): {shlex.join(a.cmd)}")
 
 
-def claim(q, me, deadline=None, grace=None):
+def need_s(t):
+    """Seconds a task still needs from its --est-min (minus the runtime of earlier attempts it resumes), or None."""
+    if t.get("est_min") is None:
+        return None
+    done = float(t.get("prior_runtime_s", 0)) if t.get("resume_cmd") and attempt_of(t) else 0.0
+    return max(0.0, float(t["est_min"]) * 60 - done)
+
+
+def still_stopping(q, t):
+    """A re-queued attempt published while its predecessor was still checkpointing (`not_before`) waits until
+    that predecessor's final result is written or its grace has passed, so two attempts never overlap."""
+    nb = t.get("not_before")
+    if not nb or time.time() >= float(nb):
+        return False
+    prev = read_json(os.path.join(paths(q)["results"], f"{t['id']}.json")) or {}
+    return attempt_of(prev) == attempt_of(t) - 1 and bool(prev.get("stopping"))
+
+
+def claim(q, me, deadline=None, grace=None, skipped=None, span=None):
+    """Claim the next task. With a deadline and the worker's full span (--max-hours in s), a task whose
+    --est-min does not fit in the worker's time left (less the grace) but would fit a fresh worker is left
+    for a fresher worker (its id goes into `skipped`). A task longer than any worker runs anyway: it resumes
+    across workers through its --resume-cmd."""
     p = paths(q)
     with locked(q):
         latest, claims = queue_state(q)
-        pending = [(PRIORITY_RANK.get(t.get("priority", "normal"), 1), 0 if t.get("front") else 1, i, t)
-                   for i, t in enumerate(latest.values()) if (t["id"], attempt_of(t)) not in claims]
+        pending = []
+        for i, t in enumerate(latest.values()):
+            if (t["id"], attempt_of(t)) in claims or still_stopping(q, t):
+                continue
+            need = need_s(t)
+            fits_fresh = span is not None and need is not None and need <= span - 60 - (grace or 0)
+            if deadline is not None and fits_fresh and need > deadline - 60 - (grace or 0) - time.time():
+                if skipped is not None:
+                    skipped.append(t["id"])
+                continue
+            pending.append((PRIORITY_RANK.get(t.get("priority", "normal"), 1), 0 if t.get("front") else 1, i, t))
         if not pending:
             return None
         t = min(pending, key=lambda x: x[:3])[3]
@@ -258,19 +307,34 @@ def claim(q, me, deadline=None, grace=None):
         return t
 
 
-def requeue_entries(t, me, reason, runtime_s):
-    """The queue line that re-queues a preempted task at its own priority, and its log line. Below high it
-    goes to the front of its priority. A high task goes behind the high tasks already waiting, so it does
-    not resume at once ahead of the work it was preempted for."""
-    n = int(t.get("preempts", 0)) + 1
+def requeue_entries(t, me, reason, runtime_s, kind="preempt"):
+    """The queue line that re-queues a task, and its log line. A preempted task (kind "preempt") goes to the
+    front of its priority below high. A preempted high task goes behind the high tasks already waiting, so
+    it does not resume at once ahead of the work it was preempted for. A task the worker stopped (kind
+    "stop": a signal or --max-hours) goes to the front of its priority, and counts apart from preemptions."""
+    preempt = kind == "preempt"
+    n = int(t.get("preempts", 0)) + (1 if preempt else 0)
+    stops = int(t.get("stop_requeues", 0)) + (0 if preempt else 1)
     resume = t.get("resume_cmd")
-    front = PRIORITY_RANK.get(t.get("priority", "normal"), 1) > PRIORITY_RANK["high"]
-    new = dict(t, attempt=attempt_of(t) + 1, preempts=n, front=front, requeued=now(),
+    front = PRIORITY_RANK.get(t.get("priority", "normal"), 1) > PRIORITY_RANK["high"] or not preempt
+    new = dict({k: v for k, v in t.items() if k != "not_before"}, attempt=attempt_of(t) + 1, preempts=n,
+               front=front, requeued=now(),
                cmd=resume or t["cmd"], prior_runtime_s=round(float(t.get("prior_runtime_s", 0)) + runtime_s, 1))
+    if stops:
+        new["stop_requeues"] = stops
     logline = {"time": now(), "task": t["id"], "attempt": attempt_of(t), "worker": me, "job": job_id(),
                "host": socket.gethostname(), "reason": reason, "runtime_s": round(runtime_s, 1),
-               "total_runtime_s": new["prior_runtime_s"], "preempt_count": n, "resume_cmd": bool(resume)}
+               "total_runtime_s": new["prior_runtime_s"], "resume_cmd": bool(resume)}
+    logline.update({"preempt_count": n} if preempt else {"kind": kind, "stop_requeues": stops})
     return new, logline
+
+
+def stop_requeue(t, me, reason, runtime_s):
+    """Re-queue entries for a task the worker stopped, or None: only with a --resume-cmd (a restart from
+    scratch could repeat forever) and at most MAX_STOP_REQUEUES times."""
+    if not t.get("resume_cmd") or int(t.get("stop_requeues", 0)) >= MAX_STOP_REQUEUES:
+        return None
+    return requeue_entries(t, me, reason, runtime_s, kind="stop")
 
 
 def publish_result(q, t, res, requeue=None):
@@ -279,15 +343,20 @@ def publish_result(q, t, res, requeue=None):
     stale result overwrites the next attempt's."""
     p = paths(q)
     rpath = os.path.join(p["preempt"], f"{t['id']}.json")
+    respath = os.path.join(p["results"], f"{t['id']}.json")
     with locked(q):
-        write_json(os.path.join(p["results"], f"{t['id']}.json"), res)
+        old = read_json(respath)
+        if old is not None and attempt_of(old) > attempt_of(res):
+            return  # a later attempt already finished: this attempt's late update must not replace it
+        write_json(respath, res)
         if requeue is not None:
             append_jsonl(p["queue"], requeue[0])
-            append_jsonl(p["preempt_log"], requeue[1])
-        late = os.path.exists(rpath)
+            append_jsonl(p["preempt_log" if res["status"] == "preempted" else "requeue_log"], requeue[1])
+        req = read_json(rpath) if os.path.exists(rpath) else None
+        late = req is not None and attempt_of(req) <= attempt_of(t)  # never a later attempt's request
         if late:
             os.remove(rpath)
-    if late and res["status"] != "preempted":
+    if late and res["status"] != "preempted" and not res.get("stopping"):
         print(f"{now()} preempt request for {t['id']} arrived after it ended, removed", flush=True)
 
 
@@ -310,6 +379,12 @@ def preempt_request(q, t):
     return None
 
 
+def interrupt_grace(signum, pgrace):
+    """USR2 is the walltime warning (bsub -wa USR2 -wt N): time for a checkpoint. A bkill (INT, TERM) is
+    followed by KILL within the site's terminate interval anyway."""
+    return pgrace if signum == signal.SIGUSR2 else 30.0
+
+
 def run_task(q, t, me, deadline, opts=None):
     p = paths(q)
     opts = opts or {}
@@ -319,14 +394,52 @@ def run_task(q, t, me, deadline, opts=None):
     os.makedirs(p["results"], exist_ok=True)
     os.makedirs(p["logs"], exist_ok=True)
     timeout = t.get("timeout_min")
-    limit = max(1.0, deadline - time.time())
-    if timeout:
-        limit = min(limit, timeout * 60)
+    # the worker's deadline sets the limit (cut early enough that the checkpoint grace ends by the deadline),
+    # unless the task's own --timeout-min comes first
+    limit = max(1.0, deadline - time.time() - pgrace)
+    worker_cut = True
+    if timeout and timeout * 60 <= limit:
+        limit, worker_cut = timeout * 60, False
     start = time.time()
     end_by = start + limit
     status, rc, interrupted = "done", None, None
-    extra, requeue = {}, None
+    extra, requeue, published = {}, None, False
     attempt = attempt_of(t)
+
+    def build_res():
+        r = {"id": t["id"], "status": status, "returncode": rc, "worker": me, "start": iso(start), "end": now(),
+             "runtime_s": round(time.time() - start, 1), "attempt": attempt,
+             "preempts": int(t.get("preempts", 0)) + (1 if status == "preempted" else 0)}
+        if attempt:
+            r["prior_runtime_s"] = t.get("prior_runtime_s", 0)
+        r.update(extra)
+        if requeue is not None and status != "preempted":
+            r["requeued"] = True
+        return r
+
+    def stop(proc, sig, grace):
+        """stop_group that survives a worker signal arriving during the grace: the result and its re-queue are
+        written at once (the scheduler may KILL this worker soon), then the task is still stopped, and the
+        signal is re-raised after the final result."""
+        nonlocal interrupted, published
+        try:
+            return stop_group(proc, sig, grace)
+        except Interrupted as e:
+            interrupted = e
+            g = interrupt_grace(e.signum, pgrace)
+            publish_early(g)
+            return stop_group(proc, sig, g)
+
+    def publish_early(grace):
+        """Write the result and its re-queue before the grace (the scheduler may KILL this worker during it).
+        The re-queued attempt waits until this one's final result or the grace has passed. Its
+        prior_runtime_s leaves out the grace, so its remaining estimate errs on the long side."""
+        nonlocal published, requeue
+        if requeue is not None:
+            requeue = (dict(requeue[0], not_before=round(time.time() + grace + 5, 1)), requeue[1])
+        publish_result(q, t, dict(build_res(), stopping=True), requeue)
+        published = True
+
     with open(os.path.join(p["logs"], f"{t['id']}.log"), "a" if attempt else "w") as log:
         log.write(f"# {now()} {me}" + (f" attempt {attempt} (after {t.get('preempts', 0)} preemption(s))"
                                          if attempt else "") + f"\n# {shlex.join(t['cmd'])}\n")
@@ -361,41 +474,52 @@ def run_task(q, t, me, deadline, opts=None):
                     grace = max(1.0, min(pgrace, budget))
                     log.write(f"# sending {psig.name}, grace {grace:g} s\n")
                     log.flush()
-                    killed = stop_group(proc, psig, grace)
-                    rc = proc.wait()
                     status = "preempted"
+                    requeue = requeue_entries(t, me, reason, time.time() - start)
+                    extra = {"reason": reason, "preempt_count": requeue[1]["preempt_count"],
+                             "requested": req.get("time"), "grace_s": round(grace, 1)}
+                    killed = stop(proc, psig, grace)
+                    rc = proc.wait()
+                    if not published:  # the runtime includes the grace
+                        requeue = requeue_entries(t, me, reason, time.time() - start)
+                    extra["preempt_exit"] = "killed" if killed else "exited"
                     log.write(f"# {now()} task {'killed after the grace period' if killed else 'exited'}"
                               f" rc={rc}\n")
-                    requeue = requeue_entries(t, me, reason, time.time() - start)
                     if not t.get("resume_cmd"):
                         msg = f"WARNING no resume command: {t['id']} restarts from scratch"
                         log.write(f"# {now()} {msg}\n")
                         print(f"{now()} {msg}", flush=True)
-                    extra = {"reason": reason, "preempt_exit": "killed" if killed else "exited",
-                             "preempt_count": requeue[1]["preempt_count"], "requested": req.get("time"),
-                             "grace_s": round(grace, 1)}
                     break
             except subprocess.TimeoutExpired:
                 status = "timeout"
-                stop_group(proc)
+                if worker_cut:  # --max-hours: the task resumes on the next worker, so let it checkpoint
+                    requeue = stop_requeue(t, me, "worker --max-hours reached", time.time() - start)
+                    stop(proc, psig, pgrace)
+                    if not published:
+                        requeue = stop_requeue(t, me, "worker --max-hours reached", time.time() - start)
+                else:
+                    stop(proc, signal.SIGTERM, 30.0)
                 rc = proc.wait()
             except Interrupted as e:  # the worker itself got a signal: stop the task, record it, re-raise
                 interrupted = e
                 status = "interrupted"
-                stop_group(proc)
+                requeue = stop_requeue(t, me, f"worker got signal {e.signum}", time.time() - start)
+                grace = interrupt_grace(e.signum, pgrace)
+                # recorded before the grace: a bkill is followed by KILL, which may end this worker mid-grace
+                publish_early(grace)
+                log.write(f"# {now()} worker got signal {e.signum}, sending {psig.name}, grace {grace:g} s\n")
+                log.flush()
+                stop_group(proc, psig, grace)
                 rc = proc.wait()
-                log.write(f"# {now()} worker got signal {e.signum}, task stopped\n")
+                log.write(f"# {now()} task stopped rc={rc}\n")
             try:
                 os.killpg(proc.pid, signal.SIGKILL)  # orphans left in the task's session
             except ProcessLookupError:
                 pass
-    res = {"id": t["id"], "status": status, "returncode": rc, "worker": me, "start": iso(start), "end": now(),
-           "runtime_s": round(time.time() - start, 1), "attempt": attempt,
-           "preempts": int(t.get("preempts", 0)) + (1 if status == "preempted" else 0)}
-    if attempt:
-        res["prior_runtime_s"] = t.get("prior_runtime_s", 0)
-    res.update(extra)
-    publish_result(q, t, res, requeue)
+    res = build_res()
+    if res.get("requeued"):
+        print(f"{now()} {t['id']} {status}: re-queued as attempt {attempt + 1} with its --resume-cmd", flush=True)
+    publish_result(q, t, res, None if published else requeue)
     if interrupted is not None:
         raise interrupted
     return res
@@ -423,14 +547,22 @@ def _drain(a, p, me, deadline, last_work):
     stop_reason = None
     opts = {"preempt_signal": a.preempt_signal, "preempt_grace": a.preempt_grace,
             "preempt_poll_s": a.preempt_poll_s}
+    noted = set()
     while True:
         if os.path.exists(p["stop"]):
-            stop_reason = "STOP file"
+            stop_reason = f"STOP file (remove {p['stop']} before starting the next worker on this queue)"
             break
-        if time.time() > deadline - 60:
+        if time.time() > deadline - 60 - a.preempt_grace:
             stop_reason = "max-hours reached"
             break
-        t = claim(a.queue, me, deadline, a.preempt_grace)
+        skipped = []
+        t = claim(a.queue, me, deadline, a.preempt_grace, skipped, span=a.max_hours * 3600)
+        for sid in skipped:
+            if sid not in noted:
+                noted.add(sid)
+                print(f"{now()} skip {sid}: its --est-min does not fit in this worker's "
+                      f"{fmt_min(max(0.0, deadline - a.preempt_grace - time.time()))} left, left for a fresher"
+                      " worker", flush=True)
         if t is None:
             idle = (time.time() - last_work) / 60
             if idle >= a.idle_min:
@@ -441,12 +573,13 @@ def _drain(a, p, me, deadline, last_work):
         print(f"{now()} start {t['id']}" + (f" attempt {attempt_of(t)}" if attempt_of(t) else ""), flush=True)
         try:
             r = run_task(a.queue, t, me, deadline, opts)
-        except Interrupted:  # signal before the task started: still leave a result, not a ghost claim
-            rpath = os.path.join(p["results"], f"{t['id']}.json")
-            old = read_json(rpath)
+        except Interrupted as e:  # signal before the task started: still leave a result, not a ghost claim
+            old = read_json(os.path.join(p["results"], f"{t['id']}.json"))
             if old is None or attempt_of(old) != attempt_of(t):
-                write_json(rpath, {"id": t["id"], "status": "interrupted", "returncode": None, "worker": me,
-                                   "runtime_s": 0.0, "end": now(), "attempt": attempt_of(t)})
+                requeue = stop_requeue(t, me, f"worker got signal {e.signum} before the task started", 0.0)
+                publish_result(a.queue, t, {"id": t["id"], "status": "interrupted", "returncode": None, "worker": me,
+                                            "runtime_s": 0.0, "end": now(), "attempt": attempt_of(t),
+                                            **({"requeued": True} if requeue else {})}, requeue)
             raise
         print(f"{now()} end   {t['id']} {r['status']} rc={r['returncode']} {r['runtime_s']}s", flush=True)
         last_work = time.time()
@@ -535,7 +668,10 @@ def cmd_status(a):
         else:
             s = "queued" + (" (resume)" if attempt_of(t) and t.get("resume_cmd") else
                             " (restart)" if attempt_of(t) else "")
-        print(f"{t['id']}\t{t.get('priority', 'normal')}\tpreempts={t.get('preempts', 0)}\t{s}")
+            if still_stopping(a.queue, t):
+                s += f", waiting for attempt {attempt_of(t) - 1} to stop (until {iso(float(t['not_before']))})"
+        stops = f"\tstops={t['stop_requeues']}" if t.get("stop_requeues") else ""
+        print(f"{t['id']}\t{t.get('priority', 'normal')}\tpreempts={t.get('preempts', 0)}\t{s}{stops}")
     if os.path.isdir(p["preempt"]):
         for f in sorted(os.listdir(p["preempt"])):
             if f.endswith(".json") and not f.startswith("."):
@@ -557,13 +693,15 @@ def main(argv=None):
                    help="high tasks are claimed before normal ones")
     s.add_argument("--resume-cmd", help="command to run instead of CMD after a preemption, e.g. "
                    "\"python train.py resume=last.pt\"")
-    s.add_argument("--est-min", type=float, help="expected runtime in minutes, used by preempt's fit check")
+    s.add_argument("--est-min", type=float, help="expected runtime in minutes: preempt's fit check, and a worker "
+                   "with too little time left leaves the task for a fresher one")
     s.add_argument("cmd", nargs=argparse.REMAINDER)
     s = sub.add_parser("run")
     s.add_argument("--queue", required=True)
     s.add_argument("--idle-min", type=float, default=25.0)
     s.add_argument("--max-hours", type=float, default=7.5,
-                   help="stop claiming tasks and end a running task at this point. Keep it below the job walltime")
+                   help="stop claiming tasks and end a running task (after its --preempt-grace) by this point. "
+                        "Keep it below the job walltime")
     s.add_argument("--poll-s", type=float, default=30.0)
     s.add_argument("--preempt-signal", type=parse_signal, default=signal.SIGTERM,
                    help="signal sent to a preempted task's process group (default TERM)")

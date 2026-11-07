@@ -56,18 +56,31 @@ bsub -q <gpu-queue> -n 4 -M 16000 -gpu "num=1" -W 8:00 -o q/worker.%J.out \
 
 - If the agent dies, the worker finishes the queue and exits after 25 idle minutes. No allocation idles until
   its walltime.
-- `touch q/STOP` makes workers finish their current task and exit.
+- `touch q/STOP` makes workers finish their current task and exit. The file stays: remove it before you
+  submit the next worker on that queue, or that worker exits at once (`status` prints "STOP file present").
 - The worker exits 0 when it stops normally (idle, max-hours, STOP), even if tasks failed: read
   `q/results/`. A signal (`bkill`, the `-wa USR2` walltime warning) stops the running task, records it as
   `interrupted` and exits 128+N, so a `done()` dependent does not run on a half-drained queue.
+- A task with `--resume-cmd` that its worker stops (a signal, or `--max-hours`) is re-queued at the front of
+  its priority and resumes on the next worker (logged in `q/requeue.log`, at most 5 times, `status` shows
+  `stops=N`). A long training can outlive one worker this way. Submit a worker if none is left. Its own
+  `--timeout-min` still ends it for good.
+- After USR2 the task gets `--preempt-grace` to checkpoint, so submit with `-wa USR2 -wt N` where N minutes
+  exceeds that grace. A `--max-hours` cut leaves the grace inside `--max-hours`. After `bkill` the task has
+  only the site's TERM-to-KILL interval (often 10 s), but its result and re-queue are written first.
+- Give long tasks `--est-min`: a worker skips a task that would fit a fresh worker but not its own time
+  left, and leaves it for a fresher worker. A task longer than any worker runs anyway, and resumes if it has
+  `--resume-cmd`.
 - For several workers, submit an array with a cap (`-J 'w[1-4]%4'`). Workers claim tasks with a file lock.
 - Results land in `q/results/<id>.json` (exit code, runtime) and logs in `q/logs/<id>.log`.
 - Each task checkpoints per unit, so a killed or slow worker redoes one task, not the wave. A task whose
   worker host is overloaded can be killed and requeued once, and the requeue is recorded.
 
-## Repurposable slot (UNTESTED on a cluster)
+## Repurposable slot
 
-When the queue is long, a running worker is worth more than a new submission. Tested on synthetic tasks only.
+When the queue is long, a running worker is worth more than a new submission. Tested on LSF farm22 on
+7 Nov 2026 (preempt and resume, idle exit, STOP, `bkill`, `bkill -s USR2`, one worker per scenario) and on
+synthetic tasks.
 
 ```bash
 scripts/queue_worker.py add --queue q/ --id w04_full --est-min 240 \
