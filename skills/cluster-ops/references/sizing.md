@@ -30,9 +30,19 @@ Run with `-with-trace` (fields `name, %cpu, peak_rss, realtime, cpus, memory, ex
 and use the p95, not one outlier:
 
 - `%cpu / (100 x cpus)` below 0.5: lower `cpus` for that process.
-- `peak_rss / memory` below 0.4: lower `memory`, and keep a retry with more for outliers:
-  `errorStrategy = { task.exitStatus in ((130..145) + 104 + (175..177)) ? 'retry' : 'finish' }`,
-  `maxRetries = 2`, `memory = { 6.GB * task.attempt }`. Cap with `process.resourceLimits`.
+- `peak_rss / memory` below 0.4: lower `memory`, and retry outliers with more. The exit codes below include
+  memory kills (130, 137) and the walltime (140), so scale both memory and time per attempt, capped by
+  `resourceLimits`:
+
+  ```groovy
+  process {
+    errorStrategy  = { task.exitStatus in ((130..145) + 104 + (175..177)) ? 'retry' : 'finish' }
+    maxRetries     = 2
+    memory         = { 4.GB * task.attempt }
+    time           = { 4.h  * task.attempt }
+    resourceLimits = [cpus: 16, memory: 64.GB, time: 2.d]   // the site's real limits
+  }
+  ```
 - Check the executor's memory semantics. Without `perJobMemLimit = true` on a site where `-M` is per job, Nextflow
   divides memory by cores and every request is wrong by a factor of the core count.
 - Keep the executor throttles the site profile sets (`queueSize`, `submitRateLimit`). `process.scratch = true`

@@ -121,19 +121,20 @@ Job scripts start from `references/job-script-template.sh`:
 
 A multi-step pipeline kept as hand-written scripts or chained `bsub` jobs (reruns by hand, no resume, outputs
 overwritten) is worth moving to Nextflow, or to an existing nf-core or sanger-tol pipeline when one fits.
-Nextflow resumes after a failure, retries a killed task with more memory, picks queues through the site profile
-and writes a trace to size each step from. Recommend it and let the user decide. On a shared cluster:
+Nextflow reruns only unfinished tasks with `-resume` and writes a trace to size each step from. nf-core pipelines
+also retry a killed task with more resources and accept institutional site profiles. A hand-written workflow
+gets these only from its own config. Recommend the move and let the user decide. Docs:
+[Nextflow](https://www.nextflow.io/docs/latest/), [nf-core](https://nf-co.re/docs/), and
+[nf-core/configs](https://github.com/nf-core/configs) for site profiles.
 
-- Use the site's institutional profile (`-profile <site>`), read once with `nextflow config -profile <site>`.
+- Run with the site profile (`-profile <site>`) and check what it sets:
+  `nextflow pull nf-core/<pipeline> -r <release>`, then `nextflow config nf-core/<pipeline> -profile <site>`.
   Farm22's profile, queues and memory settings are in `sites/sanger-farm22.md`.
 - The head job runs as a small, long batch job (2 cores, 8 GB, heap through `NXF_OPTS`), never on the login node.
 - `work/` goes on scratch, never in a small home quota. Clean it after the results are published
-  (`nextflow clean -f -k <run>`) unless the user keeps it for `-resume`.
-- Size each process from `-with-trace` and retry memory kills with more memory per attempt instead of padding
-  every task (`references/sizing.md`). Batch items that take seconds, so each task does minutes of work.
-
-Docs: [Nextflow](https://www.nextflow.io/docs/latest/), [nf-core](https://nf-co.re/docs/),
-[nf-core/configs](https://github.com/nf-core/configs) for site profiles.
+  (`nextflow clean -f -k <run>`) unless the user keeps it for `-resume`. `cleanup = true` breaks `-resume`.
+- Size processes from the trace and retry instead of padding (`references/sizing.md`). Batch items that take
+  seconds, so each task does minutes of work.
 
 ## Wait and monitor
 
