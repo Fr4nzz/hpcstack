@@ -1,6 +1,6 @@
 ---
 name: optimize-pipeline
-description: Make a slow, memory-hungry or expensive pipeline step faster and lighter without changing its results. Use when the user says "make this faster", "why is this so slow?", "it needs too much memory", "the GPU is underused", "it got OOM-killed", or before running the same recipe (training, alignment, variant calling, image processing, inference, ETL) many times.
+description: Make a slow, memory-hungry or expensive compute step faster and lighter, with output identical or within a pre-registered equivalence test. Use when a cluster job or local GPU run (training, alignment, variant calling, image processing, inference, ETL) is "so slow", "needs too much memory", got OOM-killed or underuses the GPU, or before running the same recipe many times.
 ---
 
 # Optimize a pipeline
@@ -8,12 +8,12 @@ description: Make a slow, memory-hungry or expensive pipeline step faster and li
 Goal: a measured speed-up or memory cut, with proof that the output did not change (or a pre-registered
 test showing it changed acceptably), shipped as the new default.
 
-Skip this for a one-off 30-minute run. Just check thread counts (step 3, first item) and move on.
+Skip this for a one-off 30-minute run. Just check thread counts (**Threads per process** below) and move on.
 
 ## Budget and stop rule
 
 State a budget before starting (for example, "4 GPU-hours of probes and one working day"). Stop when the
-target is met, the budget is spent, or the measured ceiling (step 3) says there is nothing left to win.
+target is met, the budget is spent, or the measured ceiling says there is nothing left to win.
 Ask the user before any change of class D or any recipe change.
 
 ## Workflow
