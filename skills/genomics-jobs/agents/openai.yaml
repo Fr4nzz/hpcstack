@@ -1,4 +1,0 @@
-interface:
-  display_name: "Genomics Jobs"
-  short_description: "Arrays, threads and Java heaps for bioinformatics"
-  default_prompt: "Use $genomics-jobs to run this tool on every sample as a right-sized job array."

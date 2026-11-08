@@ -11,8 +11,6 @@
   "skills": [
     "./skills/cluster-ops",
     "./skills/optimize-pipeline",
-    "./skills/cluster-autoresearch",
-    "./skills/genomics-jobs",
-    "./skills/nextflow-on-lsf"
+    "./skills/cluster-autoresearch"
   ]
 }

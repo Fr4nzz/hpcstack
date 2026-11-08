@@ -37,6 +37,20 @@ seff <id>
 `MaxRSS` is per step: take the maximum across `.batch`, `.extern` and numbered steps. `ReqMem` ending in `c`
 (older versions) is per core, so multiply by cores.
 
+## Nextflow trace
+
+Run with `-with-trace` (fields `name, %cpu, peak_rss, realtime, cpus, memory, exit, attempt`). Group by process
+and use the p95, not one outlier:
+
+- `%cpu / (100 x cpus)` below 0.5: lower `cpus` for that process.
+- `peak_rss / memory` below 0.4: lower `memory`, and keep a retry with more for outliers:
+  `errorStrategy = { task.exitStatus in ((130..145) + 104 + (175..177)) ? 'retry' : 'finish' }`,
+  `maxRetries = 2`, `memory = { 6.GB * task.attempt }`. Cap with `process.resourceLimits`.
+- Check the executor's memory semantics. Without `perJobMemLimit = true` on a site where `-M` is per job, Nextflow
+  divides memory by cores and every request is wrong by a factor of the core count.
+- Keep the executor throttles the site profile sets (`queueSize`, `submitRateLimit`). `process.scratch = true`
+  runs tasks on node-local disk, and one shared container cache per group saves a copy per user.
+
 ## Wait risk
 
 PEND time cannot be predicted from the request: cluster-wide load drives the long waits, and accounting does not

@@ -8,9 +8,9 @@
     {
       "name": "hpcstack",
       "source": "./",
-      "description": "Submit, right-size, optimise and clean up jobs on shared batch clusters, with budgets and verification built in.",
+      "description": "Submit, size, monitor, optimise and clean up jobs on shared batch clusters, with budgets and verification built in.",
       "category": "hpc",
-      "keywords": ["hpc", "lsf", "slurm", "cluster", "bioinformatics", "nextflow", "skills"]
+      "keywords": ["hpc", "lsf", "slurm", "cluster", "gpu", "nextflow", "skills"]
     }
   ]
 }

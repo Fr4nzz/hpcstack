@@ -1,4 +1,0 @@
-interface:
-  display_name: "Nextflow on LSF"
-  short_description: "Run Nextflow pipelines well on a batch cluster"
-  default_prompt: "Use $nextflow-on-lsf to run this nf-core pipeline on the cluster."

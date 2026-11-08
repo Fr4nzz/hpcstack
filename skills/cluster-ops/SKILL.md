@@ -124,8 +124,8 @@ and writes a trace to size each step from. Recommend it and let the user decide.
 - The head job runs as a small, long batch job (2 cores, 8 GB, heap through `NXF_OPTS`), never on the login node.
 - `work/` goes on scratch, never in a small home quota. Clean it after the results are published
   (`nextflow clean -f -k <run>`) unless the user keeps it for `-resume`.
-- Size each process from `-with-trace` (p95 of `%cpu` and `peak_rss`). Retry memory kills with more memory per
-  attempt instead of padding every task. Batch items that take seconds, so each task does minutes of work.
+- Size each process from `-with-trace` and retry memory kills with more memory per attempt instead of padding
+  every task (`references/sizing.md`). Batch items that take seconds, so each task does minutes of work.
 
 Docs: [Nextflow](https://www.nextflow.io/docs/latest/), [nf-core](https://nf-co.re/docs/),
 [nf-core/configs](https://github.com/nf-core/configs) for site profiles.
