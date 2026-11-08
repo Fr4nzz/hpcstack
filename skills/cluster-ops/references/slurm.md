@@ -29,6 +29,6 @@ Differences that bite:
 - SLURM `--mem` is per node and `--mem-per-cpu` multiplies by cores. LSF `-M` is per job on most sites (check
   `LSB_JOB_MEMLIMIT` / `perJobMemLimit` in your site profile).
 - SLURM users usually cannot raise `TimeLimit` on a running job. Pick a modest `--time` for interactive work
-  and rely on the watchdog in `safe-interactive`.
+  and rely on the `scripts/hpc-session-slurm` watchdog.
 - `seff` reports CPU efficiency and memory efficiency directly. MaxRSS is per step, so take the max over steps.
 - SLURM's `afterany` is LSF's `ended()`: it fires on failure too. Use `afterok`.

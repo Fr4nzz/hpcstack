@@ -59,7 +59,7 @@ What the output means:
   over-strict, fix it. Otherwise hand off (state file and job file, with the pending reason sent to whoever must
   act). Re-run it only as a foreground loop in the same turn, never as a new background loop. Never leave a
   pending job with no handoff.
-- Pending jobs submitted through `pendlog submit` (`right-size-jobs`): run `pendlog started --out DIR` every
+- Pending jobs submitted through `scripts/pendlog submit`: run `pendlog started --out DIR` every
   10 to 15 min, or from the wait loop (it re-checks a job at most every 10 min), so their start, PEND and
   pending reason are logged.
 - `ZOMBI`: report once and read `bacct`. Don't re-run the loop on it.
@@ -116,7 +116,7 @@ A terminal scheduler state is news, not a verdict. Check, in order:
    reads it.
 4. A worker or wrapper job's DONE says nothing about its tasks. One wave ended DONE with 6 of 9 runs crashed
    while building their data. Read the per-task results file before reporting success.
-5. Resource use for the ledger (`right-size-jobs`). If the stage passed about 1.5x its planned GPU-h or
+5. Resource use for the ledger (`scripts/jobeff`, `sizing.md`). If the stage passed about 1.5x its planned GPU-h or
    core-h, say so and why.
 
 Report what you verified and what you could not.

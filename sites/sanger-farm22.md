@@ -25,7 +25,7 @@ Internal documentation is not reproduced here. Verify every limit on the cluster
 - Users cannot ssh to compute nodes, so a running job cannot be rescued from outside. Anything it must
   save has to be published by the job itself.
 - Idle-job exceptions: `bqueues -l <queue> | grep -A2 -i idle`. They notify only and are not defined on every
-  queue, so they are no substitute for `safe-interactive`.
+  queue, so they are no substitute for `hpc-session` (`cluster-ops`).
 
 ## Queues named in the public nf-core profile
 
@@ -53,8 +53,8 @@ reflects the largest hosts and queues. Check GPU host groups with `bqueues -l gp
   a modest floor such as 16G. GPUs are shared between jobs here unless you ask for exclusive mode, so another
   job can already hold most of a GPU's memory: a plain `num=1` job ran out of memory at model load on a GPU
   where another process held 76 GB. Check the smallest GPU the queue reaches with `lshosts -gpu`.
-- Ask for the measured busy cores plus one (`right-size-jobs`). When the few hosts that fit a large GPU
-  request are short of cores, `-n` lengthens the wait. On average, GPU memory above 32G mattered far more.
+- Ask for the measured busy cores plus one (`cluster-ops`, "Size the request"). When the few hosts that fit a
+  large GPU request are short of cores, `-n` lengthens the wait. On average, GPU memory above 32G mattered more.
 - "Affinity ... not enough processor units" here also appears when the `gmem` filter or a full queue is the
   real block. Diagnose it as in `cluster-ops/references/lsf.md` ("Why pending") before cutting cores.
 
@@ -75,7 +75,7 @@ reflects the largest hosts and queues. Check GPU host groups with `bqueues -l gp
 - Team scratch is Lustre. Use `lfs quota -u $USER <mount>` and `lfs quota -g <group> <mount>` before writing
   many files. The group file count is often the tighter limit.
 - Node-local temp is under `$TMPDIR` inside jobs. Verify it is local with `findmnt -T "$TMPDIR"`.
-- See `storage-footprint` for audits. Never walk the whole team tree.
+- See `cluster-ops`, "Storage and cleanup", for audits. Never walk the whole team tree.
 
 ## Known-bad hosts
 

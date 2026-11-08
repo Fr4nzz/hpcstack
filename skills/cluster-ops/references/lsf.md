@@ -51,7 +51,7 @@ bpeek <id>                                       # stdout so far
 Finished jobs drop out of `bjobs -a` after the site's clean period, and can then be missing from plain `bacct`
 and `bhist -l` too. `bhist -n 10 -l <id>` searches the older event files. Give it a timeout of 120 s or more.
 Read the job's own status file first. The `.out` file of every job ends with a
-"Resource usage summary" (CPU time, max memory, run time). `right-size-jobs/scripts/jobeff --lsf-log` reads it.
+"Resource usage summary" (CPU time, max memory, run time). `scripts/jobeff --lsf-log` reads it.
 
 ## Modify and kill
 
@@ -116,4 +116,4 @@ GPU-hours training at 2 to 23 % GPU use that way.
 ## Job exceptions
 
 Some queues define `IDLE` (cputime/runtime below a threshold) and notify. It is cumulative, it only notifies,
-and many GPU and interactive queues don't define it. It does not replace `safe-interactive`.
+and many GPU and interactive queues don't define it. It does not replace `scripts/hpc-session`.

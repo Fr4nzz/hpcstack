@@ -1,139 +1,189 @@
 ---
 name: cluster-ops
-description: Operate on a shared batch cluster (LSF primary, SLURM equivalents). Use when the user says "run this on the cluster", "submit a job", "bsub", "sbatch", "why is my job pending", "check my jobs", "kill that job", or when you are about to ssh to a login node, copy data to or from a cluster, write a job script, or wait on a running job.
+description: Work on a shared batch cluster (LSF, SLURM): submit, size, monitor and recover jobs, safe interactive sessions, storage audits, workflow managers. Use when the user says "run this on the cluster", "submit a job", "bsub", "sbatch", "why is my job pending", "check my jobs", "kill that job", "how much memory should I ask for?", "why was my job killed (TERM_MEMLIMIT, OOM, exit 137/140)?", "was that job efficient?", "give me a GPU shell", "bsub -Is", "srun --pty", "salloc", "before I submit", "launch it", "what can I delete?", "we're over quota", "file limit reached", "clean up scratch", "run bwa on 500 samples", "run nf-core on the farm", "nextflow run", "my work dir is huge", or before you ssh to a login node, write a job script, open an interactive allocation, write many files to shared storage, or wait on a job.
 ---
 
 # Cluster operations
 
-Goal: work gets done on the cluster with the fewest wasted allocations, and every claim about a job is backed
-by evidence from the scheduler, the job's own status file, and its outputs.
+Goal: the fewest wasted allocations, every request from a measurement, and every claim about a job backed by the
+scheduler, the job's status file and its outputs.
 
-## First, know the site
+## Know the site
 
-Read `sites/<site>.md` from this repo if the user's cluster has one, and the user's `CLAUDE.md`/`AGENTS.md`
-for their group and scratch path. Otherwise discover once and ask the user to confirm:
-`lsid` or `sinfo -s`, `bqueues` or `sinfo`, `lfs df -h` or `df -h`, `findmnt -T "$PWD"`.
-Never hard-code queue limits from memory. Check them (`bqueues -l <q>`, `scontrol show partition <p>`).
+Read `sites/<site>.md` from this repo if the cluster has one, and the user's `CLAUDE.md`/`AGENTS.md` for their
+group and scratch path. Otherwise discover once (`lsid` or `sinfo -s`, `bqueues`, `lfs df -h`, `findmnt -T "$PWD"`)
+and ask the user to confirm. Check queue limits (`bqueues -l <q>`) instead of recalling them, and whether `-M`
+counts per job or per core (`LSB_JOB_MEMLIMIT`, `LSF_UNIT_FOR_LIMITS`). LSF detail: `references/lsf.md`. SLURM
+equivalents: `references/slurm.md`.
 
 ## Login-node etiquette
 
-The login node is shared by everyone. Run only light commands there: `bjobs`, `bqueues`, `lfs quota`, a
-bounded `stat`, editing files, `bsub`. Scans (`du`, `find`, `ls -R`), compression, `pip install`, builds and
-anything over a minute of CPU go in a job. See `storage-footprint` for disk questions.
+The login node is shared by everyone. Run only light commands there: `bjobs`, `bqueues`, `lfs quota`, a bounded
+`stat`, editing files, `bsub`. Scans (`du`, `find`, `ls -R`), compression, `pip install`, builds and anything over
+a minute of CPU go in a job, and so do watchdogs. Never `tmux kill-server` there: it ends every session you have,
+including other agents' live ones. Close stale tmux sessions one at a time, each checked to be an idle shell.
 
-## Interactive or batch: one rule
+## Interactive or batch
 
-- **Interactive is for probes**: environment, imports, one batch, a throughput or memory probe. Always under
-  `safe-interactive` (`hpc-session` plus a short `-W`). An interactive allocation without both is a bug.
-- **Everything that runs longer than you are guaranteed to be watching is a batch job** (or a task in a
-  worker queue, see `cluster-autoresearch`). Batch jobs end on their own when the agent stops.
-- **Local GPU or cluster: pick the one that finishes first.** For a GPU step over about 15 min, compare the
-  recent PEND for the same request (`right-size-jobs`: `pend-risk` or `pendlog export`) plus the cluster runtime
-  and any upload with the local GPU's measured time. Take the faster, and say which and why. A quiet queue can
-  start a single-GPU job in minutes while a local run takes much longer.
+- Anything that runs longer than you are sure to be watching, or can be scripted, is a batch job or a worker-queue
+  task (`cluster-autoresearch`). Batch jobs end on their own when the agent stops.
+- Interactive is for probes and first-run debugging. It always runs under `scripts/hpc-session` with a short
+  walltime. An interactive allocation without both is a bug.
+- Local GPU or cluster: for a GPU step over about 15 min, compare the recent PEND for the request plus cluster
+  runtime and upload with the local GPU's measured time. Take the faster and say why.
 
-## Submitting
+```bash
+tmux new -s probe      # on the login node
+bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00 -wa USR2 -wt 10 \
+     /path/to/hpcstack/skills/cluster-ops/scripts/hpc-session     # SLURM: srun ... --pty .../hpc-session-slurm
+```
 
-Check the site's memory semantics: the units (`LSF_UNIT_FOR_LIMITS`) and whether `-M` and `rusage[mem=]` each count
-per job or per core (`LSB_JOB_MEMLIMIT`, `sites/<site>.md`). Size both from that. Always pass both. Queue defaults
-can be as low as 100 MB.
+- `-W 2:00` is the hard backstop. Many sites refuse to extend a running job, so choose it up front.
+- `hpc-session` releases the job once nobody has typed for 30 min, job CPU is below 0.1 core and its GPUs stayed
+  below 5 %. A training inside it keeps the job alive. Settings and limits: `references/interactive.md`.
+- Ask for what the probe needs (1 GPU, a few cores, measured memory). CPU-only work goes to a CPU queue. Record
+  the job id, tmux session and purpose where the user can see them.
+- End in this order: `exit` the shell, confirm with `bjobs`/`squeue` that the job is gone (if it still runs after
+  30 s, kill that exact id and poll until DONE or EXIT), and only then `tmux kill-session -t <name>`. Closing tmux
+  does not reliably end the job.
+
+## Size the request
+
+Over-requesting is not safe padding: it lengthens the wait, burns fairshare and blocks co-tenants. Measure with
+`scripts/jobeff <ids>` (`--lsf-log logs/*.out`, `--slurm <id>`, `--user`): efficiency, peak memory, flags and a
+suggested next request. For GPUs, sample `nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv -l 10`.
+Raw fields, flags, the ledger and the preflight receipt: `references/sizing.md`.
+
+- **Memory**: `-M` about 1.3 x the measured peak (cgroup RSS, not page cache), rounded up to the next 500 MB.
+  With nothing measured, say so and pick a modest first-run value. After a memory kill, find what grew rather
+  than raising `-M` again. Java tools get `-Xmx` at about 0.8 x `-M`.
+- **Cores**: CPU efficiency is CPU time / (wall time x cores). Below 0.5, fix the tool's threads flag, then set
+  `-n` to the cores it really uses. GPU jobs with data-loader workers get the measured busy cores rounded up, plus
+  one (8.5 busy cores: `-n 10`, not 16).
+- **Walltime**: about 1.5 x the observed p95 run time. Shorter walltimes backfill sooner.
+- **GPU memory**: always set `gmem`, at about 1.3 x the measured GPU-memory peak (a modest floor such as 16G before
+  one exists). A CUDA OOM is not `TERM_MEMLIMIT`. A request above the smallest large-GPU class sharply raises the
+  chance of waiting over an hour, so fit under it when the measured peak allows.
+- **Pilots don't scale for free.** Fit the peak against input size, or probe a full-size shard. Mixed inputs get
+  one pilot per input class (its largest element). A peak from another code path is not a measurement.
+- **Every resubmit is re-sized** at submit time: reused scripts keep their old numbers.
+- **Count the hosts** before several GPU runs: the hosts that pass the GPU filter against the runs that compete
+  for them, your own included. If runs exceed hosts, order them or fit the next GPU class.
+- Never set `-M` below the measured peak, or cores below the measured best, just to start sooner. Find out why
+  the job pends (Recover).
+- Append each verified run to the project's ledger, and read it before sizing a new job.
+- PEND time cannot be predicted. `scripts/pendlog` logs waits and `scripts/pend-risk` gives the share of similar
+  recent jobs that waited over 1 h (`references/sizing.md`, untested on a cluster).
+- Genomics batch work (arrays per sample, thread flags, Java heaps, reads to linkage map): `references/genomics.md`.
+
+**Preflight.** Before anything goes to the scheduler, resolve every "no" (an unmeasured first run goes with a
+modest request, labelled as such) and write the receipt to `PREFLIGHT.md` in the run folder:
+
+1. Cores, memory and walltime cite a measurement. `-W`, `-M` and `rusage` are set. Threads flag equals cores.
+2. The shortest queue that fits. GPUs justified, GPU-hours stated. Shared GPU mode unless exclusive was measured
+   to be needed and the user agreed.
+3. Independent units are an array with a cap (`%N`). No duplicate or speculative copies (check `bjobs` first).
+4. Quota checked, bytes and files (`scripts/quota_report.sh <mount> <group> --gate`). Expected new files written
+   down, packed above about 50 per run. Temp files on node-local disk. Output to a new versioned directory.
+5. The job writes `status.json`, checkpoints, traps the walltime warning and cleans up. Dependencies use exact ids.
+6. Every variant was dry-built on CPU in the job's own environment (imports, then data assembly).
+7. You know what "finished correctly" looks like: files, counts, checksums.
+
+## Submit
 
 ```bash
 bsub -J name -q <queue> -n 4 -M 8000 -R "select[mem>=8000] rusage[mem=8000] span[hosts=1]" \
      -W 4:00 -o logs/%J.out -e logs/%J.err -wa USR2 -wt 10 bash job.sh
 ```
 
-- `-n` matches the threads flag of the tool. `span[hosts=1]` keeps threads on one node.
-- `-M` and `rusage` come from a measured peak (`right-size-jobs`). With nothing measured, say so and pick a
-  modest first-run value.
-- `-W` always. Shorter walltime backfills sooner and fits shorter queues.
-- Arrays: `-J 'name[1-500]%50'` with `%I` in log names. Housekeeping: add `-sp 1` (low priority).
-- `-wa USR2 -wt 10` sends USR2 ten minutes before the limit so the job can save and publish.
-- Before any submission run `fair-use-preflight`.
-- Before a batch of GPU runs, dry-build every variant on CPU in the job's own environment: imports, then data
-  assembly for each variant. A stage moved from a workstation to a job counts as new code. This check would
-  have saved 6 of 9 GPU runs in one batch.
-- SLURM equivalents are in `references/slurm.md`. LSF details are in `references/lsf.md`.
+- Always pass `-M`, `rusage` and `-W` (queue memory defaults can be 100 MB). Arrays: `-J 'name[1-500]%50'` with
+  `%I` in log names. Housekeeping gets `-sp 1`.
+- `-wa USR2 -wt 10` warns ten minutes before the limit so the job can save (`references/checkpointing.md`).
 
-## Job scripts
+Job scripts start from `references/job-script-template.sh`:
 
-Start from `references/job-script-template.sh`. The parts that matter:
+- `source /etc/profile || true` and module setup first, then `set -Eeuo pipefail`. Call an absolute interpreter
+  (`$ENV/bin/python`). Work under `${TMPDIR:-/tmp/$USER/$JOBID}` and prove it is local with `findmnt -T`.
+- The EXIT trap copies the last ~20 kB of the log to the shared run folder, removes the work dir, stops helpers
+  and never changes the exit code. Guard only optional diagnostics with `|| true`. Never let `|| true`, `tee` or a
+  trailing `echo` hide the exit code of the real work.
+- One bad input must not fail a whole shard: record per-item errors with the item id, fail only above a stated
+  rate. CPU-only stages go in CPU jobs, not inside a GPU allocation.
+- Replace a script that a running job uses by writing a new file and `mv`. Lint with `bash -n` and `shellcheck`.
+- Pass parameters as arguments or `-env`, and write them, the git commit and tool versions into the output folder.
 
-- `source /etc/profile || true` and module/env setup first, then `set -Eeuo pipefail`. Some site profiles
-  return non-zero and silently abort a script that set `-e` too early.
-- Call an absolute interpreter (`$ENV/bin/python`), not whatever `activate` left on `PATH`.
-- Work in a node-local dir under `${TMPDIR:-/tmp/$USER/$JOBID}` and prove it is local with `findmnt -T`.
-- An EXIT trap removes the work dir, stops helpers and the process group, and never changes the exit code
-  (see the template).
-- Background helper loops run in their own subshell with errexit off and are checked for liveness
-  (`references/checkpointing.md`).
-- The walltime fits the measured rate, and the job saves and exits cleanly if it won't
-  (`references/checkpointing.md`).
-- CPU-only stages (scoring with CPU models, packing, merging) go in CPU jobs, not inside a GPU allocation.
-- One bad input must not fail a whole shard or array element. Catch per-item read and decode errors, record
-  them in the receipt with the item id, and go on. Fail the job only above a stated error rate.
-- The EXIT trap copies the last ~20 kB of the node-local log to the shared run folder before it deletes the
-  work dir. Otherwise the log of a failed element is gone with the node's temp folder.
-- Replace a script that a running job uses by writing a new file and `mv`. Bash reads scripts as it goes, so
-  editing in place corrupts running jobs. Call scripts as `bash script.sh` (copies lose the exec bit).
-- Guard only optional diagnostics with `|| true`. Never let `|| true`, `tee` or a trailing `echo` hide the
-  exit code of the real work.
+## Workflow managers
 
-## Monitoring without blocking
+A multi-step pipeline kept as hand-written scripts or chained `bsub` jobs (reruns by hand, no resume, outputs
+overwritten) is worth moving to Nextflow, or to an existing nf-core or sanger-tol pipeline when one fits.
+Nextflow resumes after a failure, retries a killed task with more memory, picks queues through the site profile
+and writes a trace to size each step from. Recommend it and let the user decide. On a shared cluster:
 
-Bad: one tool call running `bjobs` in a `while sleep` loop for two hours.
-Good: the job writes `status.json` (phase, progress, last metric, timestamp). You poll every 30 to 60 s with a
-background watcher that exits on a terminal state, then read `status.json`, the log tail and the outputs.
-Short and long waits, handoffs and what a watcher reports are in `references/monitoring.md`.
+- Use the site's institutional profile (`-profile <site>`), read once with `nextflow config -profile <site>`.
+  Farm22's profile, queues and memory settings are in `sites/sanger-farm22.md`.
+- The head job runs as a small, long batch job (2 cores, 8 GB, heap through `NXF_OPTS`), never on the login node.
+- `work/` goes on scratch, never in a small home quota. Clean it after the results are published
+  (`nextflow clean -f -k <run>`) unless the user keeps it for `-resume`.
+- Size each process from `-with-trace` (p95 of `%cpu` and `peak_rss`). Retry memory kills with more memory per
+  attempt instead of padding every task. Batch items that take seconds, so each task does minutes of work.
 
-`DONE` is a scheduler state, not a verdict. A job is finished when its outputs exist, have the expected count
-and checksums, and the log has no silent fallback. Details in `references/monitoring.md`. Long jobs must
-checkpoint and survive a kill (`references/checkpointing.md`).
+Docs: [Nextflow](https://www.nextflow.io/docs/latest/), [nf-core](https://nf-co.re/docs/),
+[nf-core/configs](https://github.com/nf-core/configs) for site profiles.
 
-## Transfers
+## Wait and monitor
 
-Downloads can arrive truncated without an error. Compare `sha256sum` on both sides before using a file.
-Check an exact path with `stat` before concluding a file is missing (a truncated listing lies).
-When you stream data over ssh (`ssh host 'tar -c …' > file`), the remote command must print nothing else on
-stdout. Run `bjobs` and other checks in a separate call, or they end up inside the archive.
-Before deleting data, see `storage-footprint`: the source data of a trained or deployed model is kept.
+The job writes `status.json` (phase, progress, last metric, ETA, time). Wait with one background watcher that
+polls every 60 s and exits on a terminal state, a long PEND or an error, never a series of `sleep` calls or
+re-armed loops. The loop, long waits, stragglers and handoffs: `references/monitoring.md`.
 
-## Killing and replacing
+`DONE` is a scheduler state, not a verdict. A job is finished when its outputs exist with the expected count and
+checksums and the log has no silent fallback ("falling back to CPU", "retrying"). A worker's DONE says nothing
+about its tasks: read the per-task results. Long jobs checkpoint and survive a kill (`references/checkpointing.md`).
 
-- `bkill`/`scancel` the exact confirmed job id, never a pattern, and only with the user's reason.
-  Releasing your own idle interactive allocation counts as one.
-- To swap one of your own running trainings for more valuable work without re-queuing, use a worker task and
-  `queue_worker.py preempt` (`cluster-autoresearch`, "Repurposable slot") instead of `bkill` plus a new job.
-- Wait for `EXIT` before reusing its output paths, or write to a new versioned directory.
-- Never submit speculative duplicates "in case one pends".
-- Check the reply of every kill. With an expired login it can fail silently and the job keeps running.
-- A conditional approval ("stop it if progress is saved") is checked before killing. If it fails, ask.
-- No kill lines inside reusable submit scripts, no kills by name pattern, no `bkill -r` (it leaves zombie
-  jobs). Say so when a checkpoint promised for a later resume is abandoned.
-- Dependencies only fire as intended if the upstream's exit code is right (`references/lsf.md`). When an
-  upstream fails, its `done()` dependents pend forever: kill them by exact id in the same step.
+With short-lived certificates (Teleport, Kerberos), read the real validity (`tsh status`, `klist`) and renew
+before a long wait. Expiry blinds monitoring but does not kill jobs: re-authenticate, then re-check every job.
 
-## Why is it pending?
+## Storage and cleanup
 
-`bjobs -p -l <id>` (SLURM: `squeue -j <id> -o %R`, `squeue --start`). Common causes:
+Bytes and files (inodes) are separate quotas, and on team scratch the file count is often the tighter one.
+Deleting a 500 GB tar frees one inode. Packing 30,000 loose images into one tar frees 29,999.
 
-- Memory request larger than what free hosts have: right-size it.
-- "Affinity ... not enough processor units" or "no suitable hosts" is not only CPU binding. Diagnose it
-  before cutting cores (`references/lsf.md`, "Why pending").
-- A hard-coded host selector or a host excluded by a stale bad-host list.
-- Fairshare: your group used a lot recently. Smaller, shorter jobs backfill.
+1. Quota first: `scripts/quota_report.sh <mount> [group]` reads `lfs quota`, walks nothing, and shows whether the
+   user or the team is at the limit. Then ask which known trees (project dirs, run roots) are finished.
+2. Bounded probes, one level at a time under `timeout` (`lfs find DIR --maxdepth 1 -type d`). `du`, `ls -lR` and
+   parallel walkers stat every entry on the metadata server, and `du -d1` still walks the whole tree.
+3. Anything bigger gets one walk in a low-priority 1-core job (`scripts/listing_job.sh DIR OUT.tsv --submit`),
+   then every question is answered from the listing (`scripts/analyse_listing.py OUT.tsv --root DIR`).
+4. Never walk the whole team tree or other users' directories, never scan from the login node, and run one scan
+   of a filesystem at a time.
 
-## Access
+Cleanup is a plan table (path, bytes, files, why it is safe, action) that the user approves, every time. Pack
+small-file trees with `tar --zstd`, verify count and sha256 manifest before removing the originals. Log every
+deletion, never touch other users' files, and report the quota before and after. Never delete the source
+data of a trained or deployed model: pack it under a permanent folder with a README. Detail: `references/storage.md`.
 
-If the cluster uses short-lived certificates (Teleport, OIDC, Kerberos), read the real validity (`tsh status`,
-`klist`) instead of assuming it (on one site 8 h, not the 12 h the notes said). Renew before a long wait or
-handoff when a watched job will end after the certificate does, or make sure an expiry warning is armed when it
-will end more than one certificate lifetime away. Expiry blinds monitoring but does not kill jobs. Re-authenticate
-before deciding anything about job state, then re-check every watched job (`references/monitoring.md`).
+Transfers can arrive truncated without an error: compare `sha256sum` on both sides. Check an exact path with
+`stat` before concluding a file is missing. When streaming over ssh (`ssh host 'tar -c ...' > file`), the remote
+command must print nothing else on stdout.
+
+## Recover
+
+- **Why pending**: `bjobs -p -l <id>` (SLURM `squeue -j <id> -o %R`). Usual causes: a request bigger than free
+  hosts have, a GPU-memory filter only the largest GPUs meet, a stale host selector, fairshare. "Affinity ...
+  not enough processor units" is not only CPU binding: diagnose it (`references/lsf.md`) before cutting cores.
+- **Kill** only the exact confirmed id, with the user's reason (releasing your own idle allocation is one). No
+  pattern kills, no `bkill -r`, no kill lines in reusable scripts. Check the reply: with an expired login a kill
+  can fail silently. Check a conditional approval ("stop it if progress is saved") before killing.
+- No speculative duplicates. Wait for `EXIT` before reusing output paths, or write to a new directory.
+- When an upstream fails, its `done()` dependents pend forever: kill them by exact id in the same step.
+- To swap your own running training for more valuable work, use a worker task and `queue_worker.py preempt`
+  (`cluster-autoresearch`) instead of `bkill` plus a new job.
+- `TERM_MEMLIMIT` (exit 130 or 137): read the peak, find what grew, re-size. Exit 140 is the walltime. Resume into
+  a new attempt folder from the last published checkpoint (`references/checkpointing.md`).
 
 ## Done means
 
-- Job state from the scheduler, `status.json`, the log tail and the output check all agree.
-- Resource use was recorded (`right-size-jobs`) so the next request is measured.
+- Scheduler state, `status.json`, the log tail and the output check agree.
+- The next request cites measured numbers, and the ledger has a new row.
 - Interactive allocations are released, as shown by the scheduler, and helper processes are gone.
 - You list what you could not verify.

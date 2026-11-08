@@ -1,4 +1,0 @@
-interface:
-  display_name: "Safe Interactive"
-  short_description: "Interactive allocations that release themselves"
-  default_prompt: "Use $safe-interactive to give me a GPU shell that releases itself if we stop."

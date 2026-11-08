@@ -1,4 +1,4 @@
-"""Tests for skills/right-size-jobs/scripts/pendlog and pend-risk with fake LSF commands on PATH.
+"""Tests for skills/cluster-ops/scripts/pendlog and pend-risk with fake LSF commands on PATH.
 
   uv run --with pytest python -m pytest tests/
 """
@@ -13,7 +13,7 @@ import time
 import pytest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPTS = os.path.join(REPO, "skills", "right-size-jobs", "scripts")
+SCRIPTS = os.path.join(REPO, "skills", "cluster-ops", "scripts")
 PENDLOG = os.path.join(SCRIPTS, "pendlog")
 PENDRISK = os.path.join(SCRIPTS, "pend-risk")
 

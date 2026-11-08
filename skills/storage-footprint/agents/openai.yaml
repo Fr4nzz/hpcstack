@@ -1,4 +1,0 @@
-interface:
-  display_name: "Storage Footprint"
-  short_description: "Inode-first disk audit and safe cleanup"
-  default_prompt: "Use $storage-footprint to find out what I can delete without hammering the filesystem."

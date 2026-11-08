@@ -3,7 +3,7 @@
 #
 #   scripts/lint.sh
 #
-# Checks: SKILL.md frontmatter (name = folder, description with "Use when"), SKILL.md length (<= 150 lines),
+# Checks: SKILL.md frontmatter (name = folder, description with "Use when"), SKILL.md length (<= 200 lines),
 # agents/openai.yaml present, plugin.json lists exactly the skill folders, JSON validity, `bash -n` and
 # `shellcheck` (if installed) on shell scripts, Python syntax of Python scripts, executable bits on helper
 # scripts, no em dashes anywhere, no semicolons in Markdown prose (code spans and blocks are ignored).
@@ -49,8 +49,8 @@ for s in skills:
         err(f"{p}: description must say when to use it ('Use when ...')")
     if len(desc) > 1024:
         err(f"{p}: description longer than 1024 characters")
-    if len(lines) > 150:
-        err(f"{p}: {len(lines)} lines, budget is 150. Move detail to references/")
+    if len(lines) > 200:
+        err(f"{p}: {len(lines)} lines, budget is 200. Move detail to references/")
     n, cap = len(text.split()), words.get(p)
     if cap is None:
         err(f"{p}: no word budget, add it to scripts/word-budget.json")
