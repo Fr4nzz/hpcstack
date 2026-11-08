@@ -1,6 +1,6 @@
 ---
 name: cluster-ops
-description: Work on a shared batch cluster (LSF, SLURM). Submit, size, monitor and recover jobs, safe interactive sessions, storage audits, workflow managers. Use when the user says "run this on the cluster", "submit a job", "bsub", "sbatch", "why is my job pending", "check my jobs", "kill that job", "how much memory should I ask for?", "why was my job killed (TERM_MEMLIMIT, OOM, exit 137/140)?", "was that job efficient?", "give me a GPU shell", "bsub -Is", "srun --pty", "salloc", "before I submit", "is this ok to launch?", "launch it", "what can I delete?", "we're over quota", "file limit reached", "disk full", "clean up scratch", "run bwa on 500 samples", "Lep-MAP3", "run nf-core on the farm", "nextflow run", "my work dir is huge", or before you ssh to a login node, write a job script, open an interactive allocation, write many files to shared storage, or wait on a job.
+description: Submit, size, monitor and clean up jobs on a shared LSF or SLURM cluster. Use when the user says "run this on the cluster", "submit a job", "why is my job pending?", "check my jobs", "how much memory should I ask for?", "why was my job killed?", "give me a GPU shell", "we're over quota", "what can I delete?" or "run this nf-core pipeline", and before you ssh to a login node or write a job script.
 ---
 
 # Cluster operations
@@ -12,40 +12,42 @@ scheduler, the job's status file and its outputs.
 
 Read `sites/<site>.md` from this repo if the cluster has one, and the user's `CLAUDE.md`/`AGENTS.md` for their
 group and scratch path. Otherwise discover once (`lsid` or `sinfo -s`, `bqueues`, `lfs df -h`, `findmnt -T "$PWD"`)
-and ask the user to confirm. Check queue limits (`bqueues -l <q>`) instead of recalling them, and whether `-M`
-counts per job or per core (`LSB_JOB_MEMLIMIT`, `LSF_UNIT_FOR_LIMITS`). LSF detail: `references/lsf.md`. SLURM
-equivalents: `references/slurm.md`.
+and ask the user to confirm. Check queue limits with `bqueues -l <queue>` instead of recalling them, and whether
+`-M` counts per job or per core (`LSB_JOB_MEMLIMIT`, `LSF_UNIT_FOR_LIMITS`). LSF: `references/lsf.md`. SLURM:
+`references/slurm.md`.
 
 ## Login-node etiquette
 
-The login node is shared by everyone. Run only light commands there: `bjobs`, `bqueues`, `lfs quota`, a bounded
-`stat`, editing files, `bsub`. Scans (`du`, `find`, `ls -R`), compression, `pip install`, builds and anything over
-a minute of CPU go in a job. Watchdogs run inside the allocation, never on the login node or from cron. Never
+Everyone shares the login node. Run only light commands there: `bjobs`, `bqueues`, `lfs quota`, a bounded `stat`,
+editing files, `bsub`. Scans (`du`, `find`, `ls -R`), compression, `pip install`, builds and anything over a minute
+of CPU go in a job. Watchdogs run inside the allocation, never on the login node or from cron. Never
 `tmux kill-server` there: it ends every session you have, including other agents' live ones. Close stale tmux
-sessions one at a time, each checked to be an idle shell.
+sessions one at a time, after checking that each is an idle shell.
 
 ## Interactive or batch
 
 - Anything that runs longer than you are sure to be watching, or can be scripted, is a batch job or a worker-queue
   task (`cluster-autoresearch`). Batch jobs end on their own when the agent stops.
-- Interactive is for probes and first-run debugging. It always runs under `scripts/hpc-session` with a short
-  walltime. An interactive allocation without both is a bug.
+- Interactive is for probes, first-run debugging and commands that have no script yet. It always runs under
+  `scripts/hpc-session` with a short walltime. An interactive allocation without both is a bug.
 - Local GPU or cluster: for a GPU step over about 15 min, compare the recent PEND for the request plus cluster
   runtime and upload with the local GPU's measured time. Take the faster and say why.
 
 ```bash
-tmux new -s probe      # on the login node
-bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00 -wa USR2 -wt 10 \
-     /path/to/hpcstack/skills/cluster-ops/scripts/hpc-session     # SLURM: srun ... --pty .../hpc-session-slurm
+tmux new -d -s probe      # on the login node. SLURM: srun ... --pty .../hpc-session-slurm
+tmux send-keys -t probe 'bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00 \
+  -wa USR2 -wt 10 /path/to/hpcstack/skills/cluster-ops/scripts/hpc-session' Enter
 ```
 
+- Send one command at a time with `tmux send-keys -t probe '<cmd>' Enter`, wait for the prompt, then read the
+  result with `tmux capture-pane -p -t probe -S -200` or from a log file the command writes.
 - `-W 2:00` is the hard backstop. Many sites refuse to extend a running job, so choose it up front.
 - `hpc-session` releases the job once nobody types and the job's CPU and GPUs are idle. A training inside it
-  keeps the job alive. Thresholds, settings and limits: `references/interactive.md`.
+  keeps the job alive. Thresholds, settings and prompt checks: `references/interactive.md`.
 - Ask for what the probe needs (1 GPU, a few cores, measured memory). CPU-only work goes to a CPU queue. Record
   the job id, tmux session and purpose where the user can see them.
 - End in this order: `exit` the shell, confirm with `bjobs`/`squeue` that the job is gone (if it still runs after
-  30 s, kill that exact id and poll until DONE or EXIT), and only then `tmux kill-session -t <name>`. Closing tmux
+  30 s, kill that exact id and poll until DONE or EXIT), and only then `tmux kill-session -t probe`. Closing tmux
   does not reliably end the job.
 
 ## Size the request
@@ -56,8 +58,7 @@ suggested next request. For GPUs, sample `nvidia-smi --query-gpu=utilization.gpu
 Raw fields, flags, the ledger and the preflight receipt: `references/sizing.md`.
 
 - **Memory**: `-M` about 1.3 x the measured peak (cgroup RSS, not page cache), rounded up to the next 500 MB.
-  With nothing measured, say so and pick a modest first-run value. After a memory kill, find what grew rather
-  than raising `-M` again.
+  With no measurement yet, say so and start modest. After a memory kill, find what grew instead of raising `-M` again.
 - **Cores**: CPU efficiency is CPU time / (wall time x cores). Below 0.5, fix the tool's threads flag, then set
   `-n` to the cores it really uses. GPU jobs with data-loader workers get the measured busy cores rounded up, plus
   one (8.5 busy cores: `-n 10`, not 16).
@@ -69,19 +70,19 @@ Raw fields, flags, the ledger and the preflight receipt: `references/sizing.md`.
   second GPU. In a throughput array, each element's receipt records the GPU model and its measured rate.
 - **Pilots don't scale for free.** Fit the peak against input size, or probe a full-size shard. Mixed inputs get
   one pilot per input class (its largest element). A peak from another code path is not a measurement.
-- **Every resubmit is re-sized** at submit time: reused scripts keep their old numbers.
+- **Re-size every resubmit** at submit time: reused scripts keep their old numbers.
 - **Count the hosts** that pass the GPU filter before several GPU runs. If your runs exceed them, order the runs
   or fit the next GPU class.
-- Never set `-M` below the measured peak, or cores below the measured best, just to start sooner. Find out why
-  the job pends (Recover).
+- Never cut `-M` below the measured peak, or cores below the measured best, to start sooner. Find out why it
+  pends (Recover).
 - Append each verified run to the project's ledger, and read it before sizing a new job.
 - PEND time cannot be predicted. `scripts/pendlog` logs waits and `scripts/pend-risk` gives the share of similar
   recent jobs that waited over 1 h (`references/sizing.md`, untested on a cluster).
 - Genomics batch work (arrays per sample, thread flags, Java heaps, reads to linkage map): `references/genomics.md`.
 
-**Preflight.** Before anything goes to the scheduler, resolve every "no" (an unmeasured first run goes with a
-modest request, labelled as such). If you cannot resolve one, report it and wait for the user. Write the receipt
-to `PREFLIGHT.md` in the run folder:
+**Preflight.** Before anything goes to the scheduler, resolve every "no" (an unmeasured first run gets a modest
+request, labelled as such). If you cannot resolve one, report it and wait for the user. Write the receipt to
+`PREFLIGHT.md` in the run folder:
 
 1. Cores, memory and walltime cite a measurement. `-W`, `-M` and `rusage` are set (queue memory defaults can be
    100 MB). Threads flag equals cores.
@@ -89,9 +90,8 @@ to `PREFLIGHT.md` in the run folder:
    to be needed and the user agreed.
 3. Independent units are an array with a cap (`%N`) of tens, not hundreds (unless tasks are tiny and the queue
    is quiet), so it never takes a whole queue. No duplicate or speculative copies (check `bjobs` first).
-4. Quota checked, bytes and files (`scripts/quota_report.sh <mount> <group> --gate`). Expected new files written
-   down, packed above about 50 per run. Temp files and expanded archives on node-local disk. Output to a new
-   versioned directory.
+4. Quota checked, bytes and files (`scripts/quota_report.sh <mount> <group> --gate`). New files counted, packed
+   above about 50 per run. Temp files and expanded archives on node-local disk. Output to a new versioned directory.
 5. The job writes `status.json`, checkpoints, traps the walltime warning and cleans up. Dependencies use exact ids.
 6. Every variant was dry-built on CPU in the job's own environment (imports, then data assembly).
 7. You know what "finished correctly" looks like: files, counts, checksums.
@@ -103,8 +103,8 @@ bsub -J name -q <queue> -n 4 -M 8000 -R "select[mem>=8000] rusage[mem=8000] span
      -W 4:00 -o logs/%J.out -e logs/%J.err -wa USR2 -wt 10 bash job.sh
 ```
 
-- Arrays: `-J 'name[1-500]%50'` with `%I` in log names. Housekeeping gets `-sp 1`. `-wa USR2 -wt 10` warns ten
-  minutes before the limit so the job can save (`references/checkpointing.md`).
+Arrays: `-J 'name[1-500]%50'` with `%I` in log names. Housekeeping gets `-sp 1`. `-wa USR2 -wt 10` warns ten
+minutes before the limit so the job can save (`references/checkpointing.md`).
 
 Job scripts start from `references/job-script-template.sh`:
 
@@ -113,26 +113,25 @@ Job scripts start from `references/job-script-template.sh`:
 - The EXIT trap copies the last ~20 kB of the log to the shared run folder, removes the work dir, stops helpers
   and never changes the exit code. Guard only optional diagnostics with `|| true`. Never let `|| true`, `tee` or a
   trailing `echo` hide the exit code of the real work.
-- One bad input must not fail a whole shard: record per-item errors with the item id, fail only above a stated
-  rate. CPU-only stages go in CPU jobs, not inside a GPU allocation.
+- One bad input must not fail a whole shard: record per-item errors with the item id, and fail only above a
+  stated rate. CPU-only stages go in CPU jobs, not inside a GPU allocation.
 - Replace a script that a running job uses by writing a new file and `mv`. Lint with `bash -n` and `shellcheck`. A
   comment after a line-continuation backslash silently drops every later argument. Pass parameters as arguments or
   `-env`, and record them with the git commit in the output folder.
 
 ## Workflow managers
 
-A multi-step pipeline kept as hand-written scripts or chained `bsub` jobs (reruns by hand, no resume, outputs
-overwritten) is worth moving to Nextflow, or to an existing nf-core or sanger-tol pipeline when one fits. With
-`-resume`, Nextflow reuses completed tasks whose cache and outputs remain valid, and it writes a trace to size each
-step from. nf-core pipelines also retry a killed task with more resources and accept institutional site profiles. A
-hand-written workflow gets these only from its own config. Recommend the move and let the user decide. Docs:
-[Nextflow](https://www.nextflow.io/docs/latest/), [nf-core](https://nf-co.re/docs/), and
-[nf-core/configs](https://github.com/nf-core/configs) for site profiles.
+A pipeline of hand-written scripts or chained `bsub` jobs (reruns by hand, no resume, outputs overwritten) is
+worth moving to Nextflow, or to an nf-core or sanger-tol pipeline that fits. With `-resume`, Nextflow reuses
+completed tasks whose cache and outputs remain valid, and its trace sizes each step. nf-core pipelines also retry a
+killed task with more resources and accept site profiles. A Nextflow workflow you write yourself gets these only
+from its own config. Recommend the move and let the user decide. Docs:
+[Nextflow](https://www.nextflow.io/docs/latest/), [nf-core](https://nf-co.re/docs/),
+[nf-core/configs](https://github.com/nf-core/configs) (site profiles).
 
 - Run with the site profile (`-profile <site>`) and check what it sets:
-  `nextflow config nf-core/<pipeline> -r <release> -profile <site>` (Nextflow 26.04 or later). Older versions:
-  check out the release locally and run `nextflow config <checkout> -profile <site>`.
-  Farm22's profile, queues and memory settings are in `sites/sanger-farm22.md`.
+  `nextflow config nf-core/<pipeline> -r <release> -profile <site>` (Nextflow 26.04 or later). On older versions,
+  check out the release and run `nextflow config <checkout> -profile <site>`. Farm22: `sites/sanger-farm22.md`.
 - The head job runs as a small, long batch job (2 cores, 8 GB, heap through `NXF_OPTS`), never on the login node.
 - `work/` goes on scratch, never in a small home quota. Clean it after the results are published
   (`nextflow clean -f -k <run>`) unless the user keeps it for `-resume`. `cleanup = true` breaks `-resume`.
@@ -161,16 +160,16 @@ count when the inode quota is tight, by bytes when the byte quota is.
    user or the team is at the limit. Then ask which known trees (project dirs, run roots) are finished.
 2. Bounded probes, one level at a time under `timeout` (`lfs find DIR --maxdepth 1 -type d`). `du`, `ls -lR` and
    parallel walkers stat every entry on the metadata server, and `du -d1` still walks the whole tree.
-3. Anything bigger gets one walk in a low-priority 1-core job (`scripts/listing_job.sh DIR OUT.tsv --submit`),
-   then every question is answered from the listing (`scripts/analyse_listing.py OUT.tsv --root DIR`).
+3. Anything bigger gets one walk in a low-priority 1-core job (`scripts/listing_job.sh DIR OUT.tsv --submit`).
+   Answer every later question from that listing (`scripts/analyse_listing.py OUT.tsv --root DIR`).
 4. Never walk the whole team tree or other users' directories, never scan from the login node, and run one scan
    of a filesystem at a time.
 
 Cleanup is a plan table (path, bytes, files, why it is safe, action) that the user approves, every time. Pack
-small-file trees with `tar --zstd`, verify the entry count and a sha256 manifest before removing the originals.
-Log every deletion, never touch other users' files, and report the quota before and after. Never delete the
-source data of a trained or deployed model: pack it under a permanent folder with a README. Big wins, local
-disks and prevention: `references/storage.md`.
+small-file trees with `tar --zstd`, and verify the entry count and a sha256 manifest before removing the
+originals. Log every deletion, never touch other users' files, and report the quota before and after. Never
+delete the source data of a trained or deployed model: pack it under a permanent folder with a README. Big wins,
+local disks and prevention: `references/storage.md`.
 
 Transfers can arrive truncated without an error: compare `sha256sum` on both sides. Check an exact path with
 `stat` before concluding a file is missing. When streaming over ssh (`ssh host 'tar -c ...' > file`), the remote
