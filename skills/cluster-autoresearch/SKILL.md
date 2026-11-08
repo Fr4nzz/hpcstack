@@ -1,19 +1,21 @@
 ---
 name: cluster-autoresearch
-description: Run an autonomous, budgeted experiment loop (propose, run, keep or discard, repeat) on a shared cluster. Use when the user says "run experiments overnight", "autoresearch", "try ideas until it improves", "sweep this", "keep going while I'm away", or wants many model, parameter or pipeline variants tested against a fixed metric.
+description: Run an autonomous, budgeted experiment loop on a shared cluster. Use when the user says "run experiments overnight", "autoresearch", "try ideas until it improves", "sweep this", "keep going while I'm away", or wants many model, parameter or pipeline variants tested against a fixed metric.
 ---
 
 # Cluster autoresearch
 
-Goal: find changes that beat the incumbent on a fixed metric, within a stated compute budget, with every
-idea and result on record, and without leaving idle allocations behind.
+Goal: find changes that beat the incumbent (the best version so far) on a fixed metric, within a stated compute
+budget, with every idea and result on record, and without leaving idle allocations behind.
 
-This adapts the karpathy/autoresearch loop to shared hardware. The big difference: **there is no "never
-stop".** The loop has a budget and a stop rule, and each wave is sized so other users still get a GPU.
+This adapts the karpathy/autoresearch loop to shared hardware. The big difference: **there is no "never stop".**
+The loop has a budget and a stop rule, and each wave (one batch of experiments run together) is sized so others
+still get a GPU.
 
-## Before the first wave (needs the user's OK)
+## Before the first wave: agree the plan
 
-Write `program.md` from `references/program-template.md`. It fixes:
+Write `program.md` from `references/program-template.md`. If the user's approval already covers its metric,
+editable file and budget, start. Otherwise ask for the parts it leaves open. It fixes:
 
 - **Metric and data split.** One primary metric. A development split for decisions. Locked test sets are
   opened only by an explicit, logged `confirm` step that the user approves.
@@ -24,7 +26,7 @@ Write `program.md` from `references/program-template.md`. It fixes:
 - **Seeds must really differ.** Some frameworks seed the data loader with a constant, and a seed flag then
   changes only newly built layers: two fine-tunes from one checkpoint train identically and the seed spread is
   zero. Check that seed 1's first logged losses differ from seed 0's before submitting more seeds. Two
-  identical "replicates" once cost 2 GPU-h and left a result with one effective seed.
+  identical "replicates" once wasted 2 GPU-h.
 - **Budget**: total GPU-hours or core-hours, a wall-clock end, and per-wave size. State the estimate:
   "8 runs x 0.5 GPU-h = 4 GPU-h per wave, at most 5 waves".
 - **Stop rule**: budget spent, wall-clock end reached, or k waves in a row without a keep (default k = 2).
@@ -78,9 +80,8 @@ bsub -q <gpu-queue> -n 4 -M 16000 -gpu "num=1" -W 8:00 -o q/worker.%J.out \
 
 ## Repurposable slot
 
-When the queue is long, a running worker is worth more than a new submission. Tested on LSF farm22 on
-7 Nov 2026 (preempt and resume, idle exit, STOP, `bkill`, `bkill -s USR2`, one worker per scenario) and on
-synthetic tasks.
+When the queue is long, a running worker is worth more than a new submission. Tested on LSF, one worker per
+scenario.
 
 ```bash
 scripts/queue_worker.py add --queue q/ --id w04_full --est-min 240 \
