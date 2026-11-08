@@ -81,7 +81,7 @@ bsub -q <gpu-queue> -n 4 -M 16000 -gpu "num=1" -W 8:00 -o q/worker.%J.out \
 ## Repurposable slot
 
 When the queue is long, a running worker is worth more than a new submission. Tested on LSF (preempt and resume,
-idle exit, STOP, `bkill`, USR2), one worker per scenario. README, Status, has the details.
+idle exit, STOP, `bkill`, `bkill -s USR2`), one worker per scenario (README, Status).
 
 ```bash
 scripts/queue_worker.py add --queue q/ --id w04_full --est-min 240 \
