@@ -1,6 +1,6 @@
 ---
 name: nextflow-on-lsf
-description: Run Nextflow pipelines (nf-core, sanger-tol, custom) well on an LSF or SLURM cluster. Use when the user says "run nf-core on the farm", "run this Nextflow pipeline", "nextflow run", "-profile", "my pipeline's work dir is huge", "tasks keep getting killed for memory", or asks how to set process resources, retries or executor limits.
+description: Run Nextflow pipelines (nf-core, sanger-tol, custom) on an LSF or SLURM cluster. Use when the user says "run nf-core on the farm", "run this Nextflow pipeline", "nextflow run", "which Nextflow profile?", "my Nextflow work dir is huge", "Nextflow tasks keep getting killed for memory", or asks how to set process resources, retries or executor limits.
 ---
 
 # Nextflow on a batch cluster
@@ -69,7 +69,7 @@ each task does minutes of work. Thousands of 10-second jobs cost more in schedul
 
 ## Work directory hygiene
 
-- `work/` on Lustre is a large inode consumer (several files per task, every task).
+- `work/` on Lustre consumes many inodes (several files per task).
 - `process.scratch = true` runs each task in node-local temp and copies back only declared outputs.
 - After a successful run whose results are published: `nextflow clean -f -k <run-name>` removes that
   run's work files and keeps its log entries. `nextflow clean -f -before <run-name>` removes older runs.
