@@ -66,8 +66,8 @@ bkill <id>               # exact id only. bkill -s USR2 <id> sends a signal inst
 - When an upstream may end non-zero with usable output (arrays with killed and retried elements, jobs whose
   cleanup you don't control), use `ended(<id>)` and have the dependent check every required output (status
   file, receipts, counts) first and exit non-zero if any is missing.
-- Dependents of a failed upstream pend with "Dependency condition invalid or never satisfied". Resubmit the
-  chain once the cause is fixed.
+- Dependents of a failed upstream pend with "Dependency condition invalid or never satisfied". Kill them by
+  exact id (SKILL.md, Recover), then resubmit the chain once the cause is fixed.
 - A dependency fails ("No matching job found") when the referenced job records have been purged, not because
   elements were killed. Use the real original or retry ids, and re-check dependents with `bjobs -l` after any
   kill.
@@ -81,7 +81,7 @@ GPU-memory (`gmem`) filter that only the largest GPUs meet, the memory request, 
 2. Check free GPU memory per host (`bhosts -gpu -l`, `lshosts -gpu`) and the hosts the queue reaches
    (`bqueues -l <q>`).
 3. Change one thing at a time, GPU memory first, then cores, then memory. Relax only what is over-strict:
-   lower `gmem` to the sizing rule's value, or replace it with a GPU-model constraint
+   lower `gmem` to about 1.3 x the measured peak (SKILL.md, GPU memory), or replace it with a GPU-model constraint
    (`gmodel=`, checked with `lshosts -gpu`) whose memory covers that peak. Never drop the GPU-memory floor: the
    job can then land on a GPU too small for it and fail with CUDA out of memory.
 

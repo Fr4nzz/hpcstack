@@ -122,15 +122,16 @@ Job scripts start from `references/job-script-template.sh`:
 ## Workflow managers
 
 A multi-step pipeline kept as hand-written scripts or chained `bsub` jobs (reruns by hand, no resume, outputs
-overwritten) is worth moving to Nextflow, or to an existing nf-core or sanger-tol pipeline when one fits.
-Nextflow reruns only unfinished tasks with `-resume` and writes a trace to size each step from. nf-core pipelines
-also retry a killed task with more resources and accept institutional site profiles. A hand-written workflow
-gets these only from its own config. Recommend the move and let the user decide. Docs:
+overwritten) is worth moving to Nextflow, or to an existing nf-core or sanger-tol pipeline when one fits. With
+`-resume`, Nextflow reuses completed tasks whose cache and outputs remain valid, and it writes a trace to size each
+step from. nf-core pipelines also retry a killed task with more resources and accept institutional site profiles. A
+hand-written workflow gets these only from its own config. Recommend the move and let the user decide. Docs:
 [Nextflow](https://www.nextflow.io/docs/latest/), [nf-core](https://nf-co.re/docs/), and
 [nf-core/configs](https://github.com/nf-core/configs) for site profiles.
 
 - Run with the site profile (`-profile <site>`) and check what it sets:
-  `nextflow pull nf-core/<pipeline> -r <release>`, then `nextflow config nf-core/<pipeline> -profile <site>`.
+  `nextflow config nf-core/<pipeline> -r <release> -profile <site>` (Nextflow 26.04 or later). Older versions:
+  check out the release locally and run `nextflow config <checkout> -profile <site>`.
   Farm22's profile, queues and memory settings are in `sites/sanger-farm22.md`.
 - The head job runs as a small, long batch job (2 cores, 8 GB, heap through `NXF_OPTS`), never on the login node.
 - `work/` goes on scratch, never in a small home quota. Clean it after the results are published

@@ -43,7 +43,7 @@ for s in skills:
     if not m:
         err(f"{p}: no YAML frontmatter"); continue
     fm = dict(re.findall(r"^(\w+):\s*(.*)$", m.group(1), re.M))
-    for k, v in fm.items():
+    for k, v in ((k, fm.get(k, '')) for k in ('name', 'description')):
         if v[:1] not in ("'", '"') and (": " in v or " #" in v or v[:1] in "[]{}&*!|>%@`"):
             err(f"{p}: frontmatter {k} is not valid plain YAML (': ', ' #' or a leading special character). Quote it or reword")
     try:

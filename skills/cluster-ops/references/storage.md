@@ -35,7 +35,7 @@ Check known caches first (`~/.cache/pip`, `~/.cache/uv`, conda pkgs, `~/.cache/h
 
 ## Cleanup and prevention
 
-- The plan table also gets a confidence column. Before removing a packed tree, check that the entry count from
+- The cleanup plan table (SKILL.md, Storage and cleanup) also gets a confidence column. Before removing a packed tree, check that the entry count from
   `tar -tf` equals the file count.
 - Every input a model or pipeline needs exists on the cluster's shared storage, not only on a workstation.
 - `quota_report.sh <mount> <group> --gate` exits non-zero above 95 % of a limit or below 10,000 files of headroom

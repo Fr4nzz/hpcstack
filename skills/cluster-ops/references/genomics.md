@@ -1,6 +1,6 @@
 # Genomics batch work: a short summary
 
-A summary of rules that held on real genomics jobs, not an expert guide. Check tool flags against each tool's own
+A short summary of practical rules for genomics batch work, not an expert guide. Check tool flags against each tool's own
 documentation.
 
 ## Shape of the jobs
@@ -35,7 +35,7 @@ Lep-MAP3 numbers below were measured there. Re-measure on your own data.
   - OrderMarkers2: one 1-core task per linkage group and seed. `numThreads=2` gave about 1.05 cores per JVM in
     every measured run, so time one large group with 1 and 2 threads before paying for 2. With every group
     started at once, the longest group sets the wall time
-  - single-pass steps (ParentCall2, Filtering2, JoinSingles2All): single small jobs
+  - single-pass steps (ParentCall2, Filtering2, JoinSingles2All): single small jobs, measure Filtering2's threads
 - Record each replicate's explicit seed beside its output. Parse the likelihood from the output file
   itself, and test the "keep the best" step on real output before the big run.
 - Pin one tool build for every step. Some builds silently ignore parameters they do not know, so compare the
