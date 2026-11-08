@@ -84,8 +84,8 @@ Detail and a wrapper: `references/java-memory.md`.
 - Lint job scripts with `bash -n` and `shellcheck` before submitting. A comment after a line-continuation
   backslash silently drops every later argument.
 - Stochastic replicates get an explicit seed each, recorded beside the output, and run as array tasks
-  (unit x seed). Check that every replicate ran, and test the "keep the best"
-  step on real output before the big run.
+  (unit x seed). Check that every replicate ran, and test the "keep the best" step on real output before the
+  big run.
 - Exploration (re-splitting, trying plot code) belongs in a small interactive session (`safe-interactive`),
   not a series of 18-core batch jobs that last a minute.
 
