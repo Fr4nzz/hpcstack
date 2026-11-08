@@ -5,7 +5,8 @@
 #
 # Targets: --claude ~/.claude/skills, --codex ~/.codex/skills, --agents ~/.agents/skills.
 # No target flag = --claude. Existing non-symlink folders with the same name are never touched.
-# --remove deletes only symlinks that point into this repo.
+# --remove deletes only symlinks that point into this repo. Both modes also delete dangling symlinks into this
+# repo's skills/ folder (skills that were removed or renamed), and leave every other link alone.
 set -Eeuo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -17,7 +18,7 @@ for a in "$@"; do
     --agents) TARGETS+=("$HOME/.agents/skills") ;;
     --dry-run) DRY=1 ;;
     --remove) REMOVE=1 ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
     *) echo "unknown option $a" >&2; exit 2 ;;
   esac
 done
@@ -27,6 +28,10 @@ run() { if (( DRY )); then echo "would run: $*"; else "$@"; fi; }
 
 for t in "${TARGETS[@]}"; do
   run mkdir -p "$t"
+  for dst in "$t"/*; do   # links to skills that no longer exist in this repo
+    [[ -L $dst && ! -e $dst && $(readlink "$dst") == "$REPO"/skills/* ]] || continue
+    run rm "$dst"; echo "removed $dst (its skill no longer exists)"
+  done
   for s in "$REPO"/skills/*/; do
     name=$(basename "$s"); dst=$t/$name; src=${s%/}
     if (( REMOVE )); then
