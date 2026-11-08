@@ -8,7 +8,7 @@ before they optimise, clean up after themselves, and stop when their budget is s
 scheduler and SLURM gets the same treatment in every skill.
 
 They were written on a large LSF genomics and imaging cluster, from real jobs that wasted real core-hours.
-The `examples/` folder shows the measured cases.
+The `examples/` folder holds a ledger template and two short worked cases.
 
 ## Skills
 

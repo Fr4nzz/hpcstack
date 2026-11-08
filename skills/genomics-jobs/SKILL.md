@@ -28,9 +28,9 @@ wall time, and the whole allocation waits on one straggler.
 Good: a 15-task array with 1 core each. No task waits behind another, so with free slots the wall time is
 about the longest unit.
 
-Find the longest unit before submitting, start it first, and check it against the queue's run limit. If a
-workflow engine must run inside one allocation, run it with `--keep-going` so one failed unit does not stop
-the others. Without it the job still holds every core until the running units end, then fails.
+Find the longest unit before submitting, start it first (first line of the manifest), and check it against the
+queue's run limit. If a workflow engine must run inside one allocation, set its failure policy so one failed unit
+does not stop the others (Snakemake `--keep-going`, make `-k`, Nextflow `errorStrategy 'finish'`). Without it the job still holds every core until the running units end, then fails.
 
 ## Threads must match cores
 
@@ -83,7 +83,8 @@ Detail and a wrapper: `references/java-memory.md`.
 - Lint job scripts with `bash -n` and `shellcheck` before submitting. A comment after a line-continuation
   backslash silently drops every later argument.
 - Stochastic replicates get an explicit seed each, recorded beside the output, and run as array tasks
-  (unit x seed). Test the "keep the best" step on real output before the big run.
+  (unit x seed). Check that every replicate ran, and test the "keep the best"
+  step on real output before the big run.
 - Exploration (re-splitting, trying plot code) belongs in a small interactive session (`safe-interactive`),
   not a series of 18-core batch jobs that last a minute.
 
