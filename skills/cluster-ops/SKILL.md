@@ -34,7 +34,9 @@ anything over a minute of CPU go in a job. See `storage-footprint` for disk ques
 
 ## Submitting
 
-LSF memory is per job and the queue default is often tiny (100 MB on some sites). Always pass it.
+Check the site's memory semantics: the units (`LSF_UNIT_FOR_LIMITS`) and whether `-M` counts per job or
+per core (`LSB_JOB_MEMLIMIT`, `sites/<site>.md`). Always pass `-M` and `rusage`. Queue defaults can be as
+low as 100 MB.
 
 ```bash
 bsub -J name -q <queue> -n 4 -M 8000 -R "select[mem>=8000] rusage[mem=8000] span[hosts=1]" \
@@ -48,9 +50,9 @@ bsub -J name -q <queue> -n 4 -M 8000 -R "select[mem>=8000] rusage[mem=8000] span
 - Arrays: `-J 'name[1-500]%50'` with `%I` in log names. Housekeeping: add `-sp 1` (low priority).
 - `-wa USR2 -wt 10` sends USR2 ten minutes before the limit so the job can save and publish.
 - Before any submission run `fair-use-preflight`.
-- Before a GPU wave, dry-build every arm on CPU in the job's own environment: imports, then data assembly for
-  each arm. A stage moved from a workstation to a job counts as new code. One wave lost 6 of 9 GPU runs to
-  data-building crashes that a CPU check would have caught.
+- Before a batch of GPU runs, dry-build every variant on CPU in the job's own environment: imports, then data
+  assembly for each variant. A stage moved from a workstation to a job counts as new code. This check would
+  have saved 6 of 9 GPU runs in one batch.
 - SLURM equivalents are in `references/slurm.md`. LSF details are in `references/lsf.md`.
 
 ## Job scripts
@@ -124,11 +126,10 @@ Before deleting data, see `storage-footprint`: the source data of a trained or d
 ## Access
 
 If the cluster uses short-lived certificates (Teleport, OIDC, Kerberos), read the real validity (`tsh status`,
-`klist`) instead of assuming it: on one site it was 8 h, not the 12 h the notes said, and it expired three times
-in 27 h. Renew before a long wait or handoff when a watched job will end after the certificate does, or make sure an
-expiry warning is armed when it will end more than one certificate lifetime away. Expiry
-blinds monitoring but does not kill jobs. Re-authenticate before deciding anything about job state, then
-re-check every watched job (`references/monitoring.md`).
+`klist`) instead of assuming it (on one site 8 h, not the 12 h the notes said). Renew before a long wait or
+handoff when a watched job will end after the certificate does, or make sure an expiry warning is armed when it
+will end more than one certificate lifetime away. Expiry blinds monitoring but does not kill jobs. Re-authenticate
+before deciding anything about job state, then re-check every watched job (`references/monitoring.md`).
 
 ## Done means
 
