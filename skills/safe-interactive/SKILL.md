@@ -67,7 +67,7 @@ Settings are environment variables, listed in the script header (`HPC_IDLE_MIN`,
   1. `exit` the shell inside the allocation.
   2. Confirm with `bjobs`/`squeue` that the allocation is gone. If it still runs after 30 s, check the id is
      yours and kill that exact id (releasing your own idle allocation is an authorised reason). Check the
-     reply, then poll until the job shows DONE/EXIT (SLURM: COMPLETED/CANCELLED) or is absent. If it doesn't
+     reply, then poll until the job shows DONE/EXIT (SLURM: COMPLETED/CANCELLED) or is confirmed absent. If it doesn't
      resolve, keep the tmux session, keep monitoring and report.
   3. Only then close that one tmux session (`tmux kill-session -t <name>`). Closing tmux does not reliably end
      the job (one GPU idled 2 h 40 min after `exit` plus `kill-session`).
