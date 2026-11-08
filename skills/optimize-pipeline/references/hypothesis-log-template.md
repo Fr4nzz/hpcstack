@@ -1,6 +1,6 @@
-# Optimization log: <pipeline step>
+# Optimization log: `<pipeline step>`
 
-Written before the first measurement. Sections 1 to 3 do not change after measuring starts. Section 4 is
+Written before the first measurement. Sections 1 to 3 stay fixed once measuring starts. Section 4 is
 append-only.
 
 ## 1. Baseline that must not change
@@ -16,8 +16,8 @@ append-only.
 
 ## 2. Targets and budget
 
-- Target: <e.g. at least 2x faster per item, peak RSS under 10 GB, fits in 6 cores>
-- Budget: <e.g. 4 GPU-hours, 1 day>
+- Target: `<e.g. at least 2x faster per item, peak RSS under 10 GB, fits in 6 cores>`
+- Budget: `<e.g. 4 GPU-hours, 1 day>`
 - Stop when: target met, budget spent, or ceiling gap below 10 %.
 
 ## 3. Acceptance rules
@@ -26,10 +26,10 @@ append-only.
 |---|---|---|
 | E exact | identity check (`cmp`, sorted `md5sum`, `array_equal` on N items) | at least 5 % time or 10 % memory |
 | W scheduling | output equal up to order or seed | at least 5 % time or 10 % memory |
-| D distribution | pre-registered test: <metric> within max(2 x seed spread, <floor>) | at least 15 % time or 25 % memory, and test passes |
+| D distribution | pre-registered test: `<metric>` within max(2 x seed spread, `<floor>`) | at least 15 % time or 25 % memory, and the test passes |
 | Recipe | separate full run, user approval | never folded in silently |
 
-Noise floor of the speed metric: <spread of 3 baseline runs>.
+Noise floor of the speed metric: `<spread of 3 baseline runs>`.
 
 ## 4. Hypothesis log (append-only)
 

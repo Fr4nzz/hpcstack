@@ -6,8 +6,9 @@
 # Checks: SKILL.md frontmatter (valid YAML, name = folder, description with "Use when"), SKILL.md length
 # (<= 150 lines, cluster-ops <= 200), agents/openai.yaml present, plugin.json lists exactly the skill folders,
 # JSON validity, `bash -n` and `shellcheck` (if installed) on shell scripts, Python syntax of Python scripts,
-# executable bits on helper scripts, no em dashes anywhere, no semicolons in Markdown prose (code spans and
-# blocks are ignored).
+# executable bits on helper scripts, no em dashes anywhere, no semicolons in Markdown prose, no bare <tag>-like
+# placeholders in Markdown prose (they render as HTML: <s> strikes out the rest, <date> vanishes). Code spans and
+# blocks are ignored, and so are autolinks such as <https://...>.
 set -Eeuo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -113,6 +114,15 @@ for f in files:
             prose = re.sub(r"<[^>]+>|\]\([^)]*\)", "", prose)
             if ";" in prose:
                 err(f"{f}:{i}: semicolon in prose")
+        # A bare <word ...> outside code is raw HTML to a Markdown renderer: <s> strikes out the text after it,
+        # and <date> or <queue> vanish. Blank out fences and code spans (keeping line numbers), then look for tags.
+        masked = re.sub(r"(?ms)^\s*```.*?^\s*```[^\n]*$", lambda m: "\n" * m.group(0).count("\n"), text)
+        masked = re.sub(r"(`+)(?:(?!\1).)+?\1", lambda m: "\n" * m.group(0).count("\n"), masked, flags=re.S)
+        for m in re.finditer(r"</?[A-Za-z][A-Za-z0-9-]*(?=[\s/>])[^<>]*>", masked):
+            if re.match(r"<[A-Za-z][A-Za-z0-9+.-]*:", m.group(0)):
+                continue   # autolink such as <https://...>
+            i = masked.count("\n", 0, m.start()) + 1
+            err(f"{f}:{i}: bare {m.group(0)!r} outside code renders as HTML (put it in backticks)")
 sys.exit(1 if bad else 0)
 PY
 
