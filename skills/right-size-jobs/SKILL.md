@@ -58,10 +58,10 @@ For Nextflow, read `-with-trace` (`%cpu`, `peak_rss`, `realtime`). For GPUs, sam
   or starting the next stage, apply the latest measured peak, cores and GPU memory. A template value 10x over
   the measured peak (40 GB asked, 1.9 GB used) is a bug, and so is a margin of 3 %. Do it at submit, before
   the first `bsub`, not after the job pends: two jobs pended 20 to 30 min on template sizes 4x too big.
-- **Count the hosts before a wave.** A GPU-memory floor that only the largest GPUs meet can leave a handful of
-  hosts. Before a multi-run wave, count the hosts that pass the GPU filter and the runs that will compete for
-  them, including your own other lanes. If runs exceed hosts with room, order the runs, or cut the batch so the
-  job fits the next GPU class. Two lanes of one project waited 7.7 h on each other this way.
+- **Count the hosts before submitting several runs.** A GPU-memory floor that only the largest GPUs meet can
+  leave a handful of hosts. Count the hosts that pass the GPU filter and the runs that will compete for them,
+  including your runs from other work. If runs exceed hosts with room, order the runs, or cut the batch so the
+  job fits the next GPU class. Two work streams of one project waited 7.7 h on each other this way.
 - **Never set `-M` below the measured peak, or cores below the measured best, just to start sooner.** If
   the measured request pends, find out why (`cluster-ops`, "Why is it pending?").
 - **Raising `-M` after every kill is not a fix.** Find what grows first.
@@ -86,9 +86,9 @@ What the request does change is the risk:
 
 Submit through `scripts/pendlog submit --out DIR -- bsub ...` so the data grows, and schedule
 `scripts/pendlog started --out DIR` every 10 to 15 min while jobs pend (or from a wait loop: it re-checks a
-job at most every 10 min). Before a wave, run
+job at most every 10 min). Before a batch of runs, run
 `scripts/pend-risk --history jobs.csv --request "<bsub args>"` on `pendlog export` output or an accounting
-CSV. It prints how often similar recent jobs waited over 1 h, never an ETA. Both are UNTESTED on a cluster.
+CSV. It prints how often similar recent jobs waited over 1 h, never an ETA. Neither is cluster-tested yet.
 
 ## Flags from `jobeff`
 

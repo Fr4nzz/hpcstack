@@ -77,7 +77,7 @@ What the output means:
 **Short waits (under about 45 min): wait inside one tool call** with the loop above, using your harness's
 background facility (a background command or monitor), or one foreground command within the tool timeout.
 Never a series of `sleep` tool calls, repeated short polls, or re-armed loops. If an agent coordinator relays
-every turn end to a parent chat (some do, whatever the message says), each re-arm costs the parent a wake: one
+every turn end to a parent chat (some do, whatever the message says), each re-arm wakes the parent: one
 child woke its coordinator 12 times overnight by re-arming a 25-minute loop. Set the background tool's own timeout above the
 loop's cap: a loop capped at 90 min inside a 30 min background slot is killed at 30 min. The loop's real
 length is its cap plus one sleep step plus one query timeout. Keep that sum under the tool timeout: two loops
