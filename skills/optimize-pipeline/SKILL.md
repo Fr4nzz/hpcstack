@@ -36,17 +36,19 @@ Ask the user before any change of class D or any recipe change.
    - **The ceiling**: the same work with I/O removed (data held in memory, one GPU batch repeated). The gap
      between the ceiling and the real rate is all that I/O or loader work can win. No gap, stop there.
    - **Wait versus compute** per step or per item. GPU busy % (`nvidia-smi -l 10`). Cores busy.
-   - **Per-stage CPU profile** (`py-spy`, `cProfile` on a few hundred items, `perf`). Rank stages by time.
-     The usual suspects are often not the cause.
+   - **Per-stage CPU profile** (`py-spy`, `cProfile` on a few hundred items, `perf`). For a data loader,
+     profile one worker in a single process. Rank stages by time. The usual suspects are often not the cause.
    - **I/O pattern**: many small files, metadata calls, compression level, a single `gzip` at the end of a
      fast pipe (`pigz`, `bgzip -@`).
-   - **Memory as the scheduler counts it** (cgroup RSS, not page cache). Run long enough to see growth.
-   - **Silent fallbacks** in the logs: "falling back to CPU", "retrying", warnings that repeat per step.
+   - **Memory as the scheduler counts it** (cgroup RSS, not page cache). Read `memory.stat` and per-process
+     PSS before any memory change. Run long enough to see growth.
+   - **Silent fallbacks** in the logs: "falling back to CPU", "retrying", warnings that repeat per step. On
+     a shared GPU that fills up, a step can fall back to the CPU after a CUDA out-of-memory error. Chunk it.
 4. **Classify every change and verify it the cheap way:**
    - **E, exact**: output identical. Thread counts, skipping work whose result is known, vectorising,
      chunking, prefetch depth, allocator settings. Verify by identity: `cmp`, `md5sum` of sorted output,
-     `samtools view | md5sum`, `np.array_equal` on a few thousand items. Keep if it saves at least 5 % time
-     or 10 % memory.
+     `samtools view | md5sum`, `np.array_equal` on a few thousand items. For training, add an identical loss at
+     a fixed iteration of a short run. Keep if it saves at least 5 % time or 10 % memory.
    - **W, scheduling-like**: fewer workers, a different item-to-worker assignment, nondeterministic order.
      Equivalent to a new seed. Verify the output is equivalent up to order or seed noise.
    - **D, distribution-changing**: mixed precision, lossy compression, resized inputs, a different
@@ -66,12 +68,14 @@ Good: "Real 1.09 s/step, well above the GPU ceiling. Workers ran 16 or more BLAS
 first 2,000 samples identical): 0.67 s/step. Profiling one worker showed 60 % in a computation that is
 always zero for this data. Skipped it (class E, identical). With a vectorised loop (E) and fewer workers (W): 0.57 s/step
 on 6 cores instead of 16. Gap to ceiling now small. Stop."
-Full case: `examples/yolo-seg-dataloader.md`.
 
 ## Hygiene
 
 - Kill orphans between measurements. Run each probe in its own session (`setsid`) and `pkill -s <sid>`.
-  Workers of a killed parent keep running and pollute the next measurement.
+  Workers of a killed parent keep running, hold GPU memory and pollute the next measurement. They can look
+  like another user's job.
+- Record the pid of every background helper in a job script (status loops, monitors) and kill it
+  explicitly. It can outlive the EXIT trap and keep a finished job alive for hours.
 - Don't over-test exact changes. If every kept change is class E or W, the normal seeds of the real run
   already measure the remaining noise.
 - Record versions. A library upgrade mid-study invalidates the baseline.

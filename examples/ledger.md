@@ -1,8 +1,8 @@
 # Resource ledger (template)
 
 Append one row per verified run. Agents read this before sizing a job, so nobody repeats a smoke test that
-was already done. Keep it in your project, not in this repo. The two example rows use numbers from the
-examples in this folder. Unknown values are left as `-`.
+was already done. Keep it in your project, not in this repo. The two example rows show the format with
+measured numbers. Unknown values are left as `-`.
 
 | Date | Task | Input size | Queue | Cores | -M (MB) | GPU | Wall | CPU eff | Peak mem | Throughput | Source |
 |---|---|---|---|---|---|---|---|---|---|---|---|

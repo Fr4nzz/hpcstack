@@ -23,6 +23,9 @@ scripts/jobeff --user             # your recent jobs (LSF bjobs -a, or SLURM sac
 It prints one line per job: cores, CPU efficiency, peak and requested memory, run time, a suggested next
 request, and flags. Raw sources if you need them: `references/bacct-fields.md`.
 
+To audit a whole project, run it over every existing log before planning new runs. Sum core-hours
+allocated, used, and spent in jobs that failed or were killed, then fix the steps that lose the most first.
+
 For Nextflow, read `-with-trace` (`%cpu`, `peak_rss`, `realtime`). For GPUs, sample
 `nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv -l 10` during a probe.
 

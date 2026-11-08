@@ -1,6 +1,9 @@
 # Site profiles
 
-Skills stay generic. Facts about one cluster live here, one file per cluster.
+A site profile is one Markdown file of facts about one cluster: its scheduler, queues, limits, storage and
+GPUs, so the generic skills can give advice that fits it. A user of that cluster writes it from the public docs
+and read-only commands (start from `TEMPLATE.md`), and an agent reads it before working on that cluster
+whenever the user's `CLAUDE.md` or `AGENTS.md` points to it.
 
 ## How skills use a profile
 

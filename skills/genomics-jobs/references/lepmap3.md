@@ -1,8 +1,8 @@
 # Lep-MAP3 on a batch cluster
 
 Lep-MAP3 is a set of Java programs for linkage mapping. The steps differ a lot in how they parallelise, so
-one job for the whole pipeline wastes most of its allocation. Numbers below come from one audited project
-(`examples/lepmap3-linkage-map.md`). Re-measure on your own data.
+one job for the whole pipeline wastes most of its allocation. The numbers below were measured on one
+project. Re-measure on your own data.
 
 ## Steps and how to run them
 
@@ -19,7 +19,7 @@ one job for the whole pipeline wastes most of its allocation. Numbers below come
 
 ## `numThreads` is not cores used
 
-In every audited OrderMarkers2 run, `numThreads=2` gave **1.03-1.10 cores** per JVM (job CPU time divided by
+In every measured OrderMarkers2 run, `numThreads=2` gave **1.03-1.10 cores** per JVM (job CPU time divided by
 the summed wall time of the per-LG tasks). Half of each allocation idled by design.
 
 - Measure once: one large LG with `numThreads=1` and with `numThreads=2`, same seed. Pay for 2 cores only if
@@ -29,9 +29,8 @@ the summed wall time of the per-LG tasks). Half of each allocation idled by desi
 
 ## The longest LG sets the wall time
 
-LGs vary several-fold in ordering time (in the audit, from under an hour to 32 h). Wrappers start them in
-number order, so a long LG can start hours late. One run finished 56 minutes short of a 48 h queue limit
-because its longest LG started at hour 11.
+LGs vary several-fold in ordering time (from under an hour to 32 h on one project). Wrappers start them in
+number order, so a long LG can start hours late and push the job close to the queue's run limit.
 
 - One array task per LG lets every LG start at once. Wall time becomes the longest LG.
 - Check the longest LG against the queue's run limit before submitting.
@@ -39,8 +38,8 @@ because its longest LG started at hour 11.
 ## Java heap
 
 Lep-MAP3 scripts often call `java` without `-Xmx`. On a big-memory node the default heap is about 1/4 of RAM,
-so it grows until the job hits `-M`. The audited project raised `-M` from 30 to 80 GB after kills, while the
-measured need was about 7.5 GB per OrderMarkers2 JVM.
+so it grows until the job hits `-M`. Size the heap from a measured peak instead of raising `-M` after each
+kill (about 7.5 GB per OrderMarkers2 JVM on one project).
 
 ```bash
 java -Xmx6g -XX:ActiveProcessorCount=1 -cp "$LEPMAP3/bin" OrderMarkers2 \
@@ -70,10 +69,12 @@ OrderMarkers2 is stochastic. If the method says "run N times, keep the best like
 - Build long argument lists in a bash array and comment each element. A comment after a line-continuation
   backslash ends the command there.
 
-## Orchestration traps seen in practice
+## Orchestration
 
-- `wrapper ... || true` turned memory kills, incomplete-file errors and hung prompts into "Successfully
-  completed".
-- `-w "ended(name)"` dependencies let a failed chromosome silently drop out of the concatenated input.
-- An interactive "choose the map" prompt hung a batch job until its walltime.
-- Parameters set by editing the script before `bsub` produced a run labelled with the wrong subsample.
+- Let a failure fail. A wrapper under `|| true` reports memory kills, incomplete files and hung prompts as
+  "Successfully completed".
+- Depend on `done(<jobid>)`, not `ended(name)`, so a failed chromosome cannot silently drop out of the
+  concatenated input.
+- Answer the interactive "choose the map" prompt in advance or skip it. In a batch job it hangs until the
+  walltime.
+- Pass the subsample and other parameters as arguments, so each run's label matches what it ran.
