@@ -20,12 +20,13 @@ bsub -J 'align[1-500]%50' -n 4 -M 8000 -R "select[mem>=8000] rusage[mem=8000] sp
 # in align.sh:  read -r sample r1 r2 < <(sed -n "${LSB_JOBINDEX}p" "$1")
 ```
 
-Arrays release cores as tasks finish, isolate failures, and let the longest unit start straight away. Rerun
+Arrays release cores as tasks finish, isolate failures, and start each unit when a slot frees. Rerun
 only failed indices (`bsub -J 'align[7,42,311]'`). Patterns and SLURM syntax: `references/arrays.md`.
 
 Bad: one 8-core job running 15 chromosomes 4 at a time. The slowest chromosome starts late and sets the
 wall time, and the whole allocation waits on one straggler.
-Good: a 15-task array with 1 core each. The longest task starts at once. Total wall time = longest unit.
+Good: a 15-task array with 1 core each. No task waits behind another, so with free slots the wall time is
+about the longest unit.
 
 ## Threads must match cores
 
@@ -82,8 +83,8 @@ Detail and a wrapper: `references/java-memory.md`.
 
 ## Lep-MAP3 and linkage mapping
 
-Step-by-step guidance (which steps parallelise per linkage group, `numThreads`, heap sizing, replicates
-with seeds) is in `references/lepmap3.md`. The measured case is `examples/lepmap3-linkage-map.md`.
+Which steps parallelise per linkage group, `numThreads`, heap sizing and seeded replicates:
+`references/lepmap3.md`. Measured case: `examples/lepmap3-linkage-map.md`.
 
 ## Done means
 
