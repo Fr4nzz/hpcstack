@@ -1,6 +1,6 @@
 ---
 name: optimize-pipeline
-description: Make a slow, memory-hungry or expensive compute step faster and lighter, with output identical or within a pre-registered equivalence test. Use when a cluster job or local GPU run (training, alignment, variant calling, image processing, inference, ETL) is "so slow", "needs too much memory", got OOM-killed or underuses the GPU, or before running the same recipe many times.
+description: Make a slow, memory-hungry or expensive compute step faster and lighter, with output identical or within a pre-registered equivalence test. Use when a cluster job or long local run (training, alignment, variant calling, image processing, inference, ETL) is too slow ("make this faster", "why is this so slow?"), needs too much memory, got OOM-killed or underuses the GPU, or before running the same recipe many times.
 ---
 
 # Optimize a pipeline

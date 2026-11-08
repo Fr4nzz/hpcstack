@@ -26,7 +26,7 @@ editable file and budget, start. Otherwise ask for the parts it leaves open. It 
 - **Seeds must really differ.** Some frameworks seed the data loader with a constant, and a seed flag then
   changes only newly built layers: two fine-tunes from one checkpoint train identically and the seed spread is
   zero. Check that seed 1's first logged losses differ from seed 0's before submitting more seeds. Two
-  identical "replicates" once wasted 2 GPU-h.
+  identical "replicates" once cost 2 GPU-h and left one effective seed.
 - **Budget**: total GPU-hours or core-hours, a wall-clock end, and per-wave size. State the estimate:
   "8 runs x 0.5 GPU-h = 4 GPU-h per wave, at most 5 waves".
 - **Stop rule**: budget spent, wall-clock end reached, or k waves in a row without a keep (default k = 2).
@@ -80,8 +80,8 @@ bsub -q <gpu-queue> -n 4 -M 16000 -gpu "num=1" -W 8:00 -o q/worker.%J.out \
 
 ## Repurposable slot
 
-When the queue is long, a running worker is worth more than a new submission. Tested on LSF, one worker per
-scenario.
+When the queue is long, a running worker is worth more than a new submission. Tested on LSF (preempt and resume,
+idle exit, STOP, `bkill`, USR2), one worker per scenario. README, Status, has the details.
 
 ```bash
 scripts/queue_worker.py add --queue q/ --id w04_full --est-min 240 \

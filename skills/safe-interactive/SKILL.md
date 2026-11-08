@@ -53,7 +53,8 @@ Goal: no interactive allocation outlives its usefulness by more than about 30 mi
 
    A GPU pause with low CPU that lasts longer than the CPU window (`HPC_CPU_WINDOW_S`, default 300 s) still
    counts as idle, so a typing-free job with long CPU-light pauses (large evaluations, slow checkpoint
-   uploads) can be released. Raise the window for such jobs.
+   uploads) can be released. Raise the window for such jobs. Untested: several GPUs in one job, a GPU shared with
+   another tenant, and the scheduler's pre-kill warning.
 
 Settings are environment variables, listed in the script header (`HPC_IDLE_MIN`, `HPC_CPU_IDLE_CORES`,
 `HPC_GPU_IDLE_PCT`, `HPC_DRY_RUN`, ...).

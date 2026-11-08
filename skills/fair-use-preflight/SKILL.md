@@ -8,9 +8,9 @@ description: Fairness and safety checklist for anything sent to a shared cluster
 Goal: nothing goes to the scheduler without a measured request, a time limit, a storage plan and a recovery
 plan. It takes a minute. Skipping it is how a 1-core tool ends up holding 18 cores and 80 GB for a day.
 
-Stop rule: resolve every "no" or "unknown" before submitting. Only an unmeasured first run is exempt (first
-item). Report any other unfixable item to the user and wait for their decision. Mark items that don't
-apply n/a.
+Stop rule: resolve every "no" or "unknown" before submitting. The one exception is the first item: an unmeasured
+first run goes with a modest request, labelled in the receipt. Report any other unfixable item to the user and wait
+for their decision. Mark items that don't apply n/a.
 
 ## Checklist
 

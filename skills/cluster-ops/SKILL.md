@@ -34,9 +34,9 @@ anything over a minute of CPU go in a job. See `storage-footprint` for disk ques
 
 ## Submitting
 
-Check the site's memory semantics: the units (`LSF_UNIT_FOR_LIMITS`) and whether `-M` counts per job or
-per core (`LSB_JOB_MEMLIMIT`, `sites/<site>.md`). Always pass `-M` and `rusage`. Queue defaults can be as
-low as 100 MB.
+Check the site's memory semantics: the units (`LSF_UNIT_FOR_LIMITS`) and whether `-M` and `rusage[mem=]` each count
+per job or per core (`LSB_JOB_MEMLIMIT`, `sites/<site>.md`). Size both from that. Always pass both. Queue defaults
+can be as low as 100 MB.
 
 ```bash
 bsub -J name -q <queue> -n 4 -M 8000 -R "select[mem>=8000] rusage[mem=8000] span[hosts=1]" \

@@ -60,7 +60,7 @@ For Nextflow, read `-with-trace` (`%cpu`, `peak_rss`, `realtime`). For GPUs, sam
   the first `bsub`, not after the job pends: two jobs pended 20 to 30 min on template sizes 4x too big.
 - **Count the hosts before submitting several runs.** A GPU-memory floor that only the largest GPUs meet can
   leave a handful of hosts. Count the hosts that pass the GPU filter and the runs that will compete for them,
-  including your runs from other work. If runs exceed hosts with room, order the runs, or cut the batch so the
+  including your own runs for other tasks. If runs exceed hosts with room, order the runs, or cut the batch so the
   job fits the next GPU class. Two work streams of one project waited 7.7 h on each other this way.
 - **Never set `-M` below the measured peak, or cores below the measured best, just to start sooner.** If
   the measured request pends, find out why (`cluster-ops`, "Why is it pending?").
