@@ -40,8 +40,8 @@ bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00
 ```
 
 - `-W 2:00` is the hard backstop. Many sites refuse to extend a running job, so choose it up front.
-- `hpc-session` releases the job once nobody has typed for 30 min, job CPU is below 0.1 core and its GPUs stayed
-  below 5 %. A training inside it keeps the job alive. Settings and limits: `references/interactive.md`.
+- `hpc-session` releases the job once nobody types and the job's CPU and GPUs are idle. A training inside it
+  keeps the job alive. Thresholds, settings and limits: `references/interactive.md`.
 - Ask for what the probe needs (1 GPU, a few cores, measured memory). CPU-only work goes to a CPU queue. Record
   the job id, tmux session and purpose where the user can see them.
 - End in this order: `exit` the shell, confirm with `bjobs`/`squeue` that the job is gone (if it still runs after
@@ -57,7 +57,7 @@ Raw fields, flags, the ledger and the preflight receipt: `references/sizing.md`.
 
 - **Memory**: `-M` about 1.3 x the measured peak (cgroup RSS, not page cache), rounded up to the next 500 MB.
   With nothing measured, say so and pick a modest first-run value. After a memory kill, find what grew rather
-  than raising `-M` again. Java tools get `-Xmx` at about 0.8 x `-M`.
+  than raising `-M` again.
 - **Cores**: CPU efficiency is CPU time / (wall time x cores). Below 0.5, fix the tool's threads flag, then set
   `-n` to the cores it really uses. GPU jobs with data-loader workers get the measured busy cores rounded up, plus
   one (8.5 busy cores: `-n 10`, not 16).
@@ -83,13 +83,15 @@ Raw fields, flags, the ledger and the preflight receipt: `references/sizing.md`.
 modest request, labelled as such). If you cannot resolve one, report it and wait for the user. Write the receipt
 to `PREFLIGHT.md` in the run folder:
 
-1. Cores, memory and walltime cite a measurement. `-W`, `-M` and `rusage` are set. Threads flag equals cores.
+1. Cores, memory and walltime cite a measurement. `-W`, `-M` and `rusage` are set (queue memory defaults can be
+   100 MB). Threads flag equals cores.
 2. The shortest queue that fits. GPUs justified, GPU-hours stated. Shared GPU mode unless exclusive was measured
    to be needed and the user agreed.
 3. Independent units are an array with a cap (`%N`) of tens, not hundreds (unless tasks are tiny and the queue
    is quiet), so it never takes a whole queue. No duplicate or speculative copies (check `bjobs` first).
 4. Quota checked, bytes and files (`scripts/quota_report.sh <mount> <group> --gate`). Expected new files written
-   down, packed above about 50 per run. Temp files on node-local disk. Output to a new versioned directory.
+   down, packed above about 50 per run. Temp files and expanded archives on node-local disk. Output to a new
+   versioned directory.
 5. The job writes `status.json`, checkpoints, traps the walltime warning and cleans up. Dependencies use exact ids.
 6. Every variant was dry-built on CPU in the job's own environment (imports, then data assembly).
 7. You know what "finished correctly" looks like: files, counts, checksums.
@@ -101,9 +103,8 @@ bsub -J name -q <queue> -n 4 -M 8000 -R "select[mem>=8000] rusage[mem=8000] span
      -W 4:00 -o logs/%J.out -e logs/%J.err -wa USR2 -wt 10 bash job.sh
 ```
 
-- Always pass `-M`, `rusage` and `-W` (queue memory defaults can be 100 MB). Arrays: `-J 'name[1-500]%50'` with
-  `%I` in log names. Housekeeping gets `-sp 1`.
-- `-wa USR2 -wt 10` warns ten minutes before the limit so the job can save (`references/checkpointing.md`).
+- Arrays: `-J 'name[1-500]%50'` with `%I` in log names. Housekeeping gets `-sp 1`. `-wa USR2 -wt 10` warns ten
+  minutes before the limit so the job can save (`references/checkpointing.md`).
 
 Job scripts start from `references/job-script-template.sh`:
 
@@ -114,8 +115,9 @@ Job scripts start from `references/job-script-template.sh`:
   trailing `echo` hide the exit code of the real work.
 - One bad input must not fail a whole shard: record per-item errors with the item id, fail only above a stated
   rate. CPU-only stages go in CPU jobs, not inside a GPU allocation.
-- Replace a script that a running job uses by writing a new file and `mv`. Lint with `bash -n` and `shellcheck`.
-  A comment after a line-continuation backslash silently drops every later argument. Pass parameters as arguments or `-env`, and record them with the git commit in the output folder.
+- Replace a script that a running job uses by writing a new file and `mv`. Lint with `bash -n` and `shellcheck`. A
+  comment after a line-continuation backslash silently drops every later argument. Pass parameters as arguments or
+  `-env`, and record them with the git commit in the output folder.
 
 ## Workflow managers
 
@@ -139,11 +141,11 @@ gets these only from its own config. Recommend the move and let the user decide.
 ## Wait and monitor
 
 The job writes `status.json` (phase, progress, last metric, ETA). Wait with one background watcher that polls
-every 60 s and exits on a terminal state, a long PEND or an error, never with repeated `sleep` calls. The loop, long waits, stragglers and handoffs: `references/monitoring.md`.
+every 60 s and exits on a terminal state, a long PEND or an error, never with repeated `sleep` calls. The loop,
+long waits, stragglers and handoffs: `references/monitoring.md`.
 
-`DONE` is a scheduler state, not a verdict. A job is finished when its outputs exist with the expected count and
-checksums and the log has no silent fallback ("falling back to CPU", "retrying"). A worker's DONE says nothing
-about its tasks: read the per-task results. Long jobs checkpoint and survive a kill (`references/checkpointing.md`).
+`DONE` is a scheduler state, not a verdict. Before reporting a job finished, run the checks in
+`references/monitoring.md`, "When it ends". Long jobs checkpoint and survive a kill (`references/checkpointing.md`).
 
 With short-lived certificates (Teleport, Kerberos), read the real validity (`tsh status`, `klist`) and renew
 before a long wait. Expiry blinds monitoring but does not kill jobs: re-authenticate, then re-check every job.
@@ -164,9 +166,10 @@ count when the inode quota is tight, by bytes when the byte quota is.
    of a filesystem at a time.
 
 Cleanup is a plan table (path, bytes, files, why it is safe, action) that the user approves, every time. Pack
-small-file trees with `tar --zstd`, verify count and sha256 manifest before removing the originals. Log every
-deletion, never touch other users' files, and report the quota before and after. Never delete the source
-data of a trained or deployed model: pack it under a permanent folder with a README. Detail: `references/storage.md`.
+small-file trees with `tar --zstd`, verify the entry count and a sha256 manifest before removing the originals.
+Log every deletion, never touch other users' files, and report the quota before and after. Never delete the
+source data of a trained or deployed model: pack it under a permanent folder with a README. Big wins, local
+disks and prevention: `references/storage.md`.
 
 Transfers can arrive truncated without an error: compare `sha256sum` on both sides. Check an exact path with
 `stat` before concluding a file is missing. When streaming over ssh (`ssh host 'tar -c ...' > file`), the remote
@@ -175,17 +178,17 @@ command must print nothing else on stdout.
 ## Recover
 
 - **Why pending**: `bjobs -p -l <id>` (SLURM `squeue -j <id> -o %R`). Usual causes: a request bigger than free
-  hosts have, a GPU-memory filter only the largest GPUs meet, a stale host selector, fairshare. "Affinity ...
-  not enough processor units" is not only CPU binding: diagnose it (`references/lsf.md`) before cutting cores.
+  hosts have, a GPU-memory filter only the largest GPUs meet, a stale host selector, fairshare. Diagnose
+  "Affinity ... not enough processor units" with `references/lsf.md` before cutting cores.
 - **Kill** only the exact confirmed id, with the user's reason (releasing your own idle allocation is one). No
   pattern kills, no `bkill -r`, no kill lines in reusable scripts. Check the reply: with an expired login a kill
   can fail silently. Check a conditional approval ("stop it if progress is saved") before killing.
-- No speculative duplicates. Wait for `EXIT` before reusing output paths, or write to a new directory.
+- Wait for `EXIT` before reusing output paths, or write to a new directory.
 - When an upstream fails, its `done()` dependents pend forever: kill them by exact id in the same step.
 - To swap your own running training for more valuable work, use a worker task and `queue_worker.py preempt`
   (`cluster-autoresearch`) instead of `bkill` plus a new job.
 - After `TERM_MEMLIMIT` (exit 130 or 137) or a walltime kill (140), re-size from the measured peak or rate and
-  resume into a new attempt folder from the last published checkpoint (`references/checkpointing.md`).
+  resume from the last published checkpoint (`references/checkpointing.md`).
 
 ## Done means
 

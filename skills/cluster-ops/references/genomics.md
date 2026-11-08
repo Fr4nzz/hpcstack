@@ -12,16 +12,13 @@ documentation.
   each are batched several per task.
 - If a workflow engine must run inside one allocation, set its failure policy so independent units continue after
   one fails, and make the final status list every failed unit.
-- **Threads flag equals cores**: `bwa mem -t N`, `minimap2 -t N`, `samtools sort -@ (N-1)`, `pigz -p N`, with
-  `span[hosts=1]`, then measure the cores really used. `samtools sort -m` is per thread, so `-@` x `-m` stays
-  below `-M`.
+- **Threads flag equals cores**: `bwa mem -t N`, `minimap2 -t N`, `samtools sort -@ (N-1)`, `pigz -p N`.
+  `samtools sort -m` is per thread, so `-@` x `-m` stays below `-M`.
 - **Java heap about 0.8 x the memory limit.** Without `-Xmx` the JVM takes about 1/4 of the node's RAM and grows
-  until the scheduler kills it. Add `-XX:ActiveProcessorCount=$NCPU` and `-Djava.io.tmpdir=$TMPDIR`. Launchers
-  take them through `--java-options` or `JAVA_OPTS`.
-- **No small-file floods.** One bgzipped, indexed file per sample or chromosome (`bgzip`, `tabix`,
-  `samtools index`), never one per locus. Temp files on node-local disk. Merge array outputs in a small dependent
-  job. Reuse shared reference data and indexes instead of copying them per job, and pin container images by
-  digest or file hash.
+  until the scheduler kills it. Add `-XX:ActiveProcessorCount=$NCPU` and `-Djava.io.tmpdir=$TMPDIR`.
+- **No small-file floods.** One bgzipped, indexed file per sample or chromosome (`bgzip`, `tabix`, `samtools
+  index`), never one per locus. Merge array outputs in a small dependent job. Reuse shared reference data and
+  indexes instead of copying them per job, and pin container images by digest or file hash.
 
 ## Reads to linkage map
 
@@ -39,11 +36,11 @@ Lep-MAP3 numbers below were measured there. Re-measure on your own data.
     every measured run, so time one large group with 1 and 2 threads before paying for 2. With every group
     started at once, the longest group sets the wall time
   - single-pass steps (ParentCall2, Filtering2, JoinSingles2All): single small jobs
-- Give each replicate an explicit seed, recorded beside the output. Parse the likelihood from the output file
+- Record each replicate's explicit seed beside its output. Parse the likelihood from the output file
   itself, and test the "keep the best" step on real output before the big run.
 - Pin one tool build for every step. Some builds silently ignore parameters they do not know, so compare the
   parameters the tool echoes with the ones you passed.
 - Answer interactive prompts in advance or skip them: in a batch job they hang until the walltime.
-- Summaries and plots run in a separate small job, so a plotting bug cannot fail hours of compute.
+- Summaries and plots run in a separate small job.
 - Exploration (re-splitting, plot code) belongs in a short interactive session, not in a series of many-core
   batch jobs that each last a minute.

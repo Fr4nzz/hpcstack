@@ -15,7 +15,7 @@ and `lfs quota` reads that accounting directly without walking anything.
 | `du -d1` | full walk | the depth limits output only |
 | gdu, dust, pdu | full walk, in parallel | fine on local NVMe, harsh on a shared MDS |
 
-- Count with `lfs find DIR -type f | wc -l`. Probe one level at a time with `--maxdepth` under `timeout`.
+- Count files with `lfs find DIR -type f | wc -l`.
 - `scripts/analyse_listing.py` answers top directories by count and bytes, age, extensions and duplicates from
   one listing.
 - Run one scan at a time, also across parallel agents or subagents. Prefer your centre's own Lustre guidance.
@@ -33,22 +33,10 @@ Check known caches first (`~/.cache/pip`, `~/.cache/uv`, conda pkgs, `~/.cache/h
 - duplicate copies (same size, then same hash) and split transfer parts whose whole file exists
 - one output file per tile, locus or iteration that could be one indexed file
 
-## Cleanup
+## Cleanup and prevention
 
-1. Plan table: path, bytes, files, why it is safe, confidence, action (delete, pack, archive elsewhere). The user
-   approves every deletion.
-2. Pack small-file trees with `tar --zstd -cf x.tar.zst DIR`. Before removing the originals, check that the entry
-   count from `tar -tf` equals the file count and keep a sha256 manifest of the originals.
-3. Log every deletion (path, size, files, time). Never touch other users' files.
-4. Never delete the source data of a trained or deployed model (the images, reads or tables it was built from).
-   If its file count is the problem, pack it into plain tars with a manifest under a permanent folder with a
-   README. One team deleted the 32,000 source photos behind a live model.
-5. Run `scripts/quota_report.sh` again and report before and after.
-
-## Prevention
-
+- The plan table also gets a confidence column. Before removing a packed tree, check that the entry count from
+  `tar -tf` equals the file count.
 - Every input a model or pipeline needs exists on the cluster's shared storage, not only on a workstation.
-- Write the expected number of new files before submitting. Above about 50 per run, pack or merge them.
-- Expand archives on node-local disk inside jobs, proved local with `findmnt -T`.
-- Gate submissions on quota: `quota_report.sh <mount> <group> --gate` exits non-zero above 95 % of a limit or
-  below 10,000 files of headroom (both adjustable).
+- `quota_report.sh <mount> <group> --gate` exits non-zero above 95 % of a limit or below 10,000 files of headroom
+  (both adjustable), so a submit script can stop on it.

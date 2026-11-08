@@ -11,17 +11,14 @@
 
 ## How the agent waits
 
-Bad:
-
-```bash
-while true; do bjobs 1234; sleep 60; done      # blocks the session, never ends on its own
-```
-
-Good: one background watcher that polls every 60 s and exits on a terminal state, a long PEND or an error.
+One background watcher polls every 60 s and exits on a terminal state, a long PEND or an error. A foreground
+`while sleep` loop blocks the session and never ends on its own.
 
 ```bash
 # LSF. UNTIL=RUN before a long handoff. Over ssh, put the ssh command inside the timeout.
-J=1234; UNTIL=END; CAP=2700; PEND_S=1200   # background: set the tool's own timeout parameter >= CAP+180 s (e.g. 3000 s), not only a shell timeout; foreground (600 s): CAP=420 PEND_S=300
+# Background: set the tool's own timeout parameter >= CAP+180 s (e.g. 3000 s), not only a shell timeout.
+# Foreground (600 s tool timeout): CAP=420 PEND_S=300.
+J=1234; UNTIL=END; CAP=2700; PEND_S=1200
 ts=$(date +%s); t0=${T0:-$ts}   # ts: this call (CAP). t0: first call (PEND_S); pass T0 on a re-run
 while :; do
   rc=0; r=$(timeout 60 bjobs -noheader -o stat "$J" 2>&1) || rc=$?; s=${r##*$'\n'}   # survives set -e

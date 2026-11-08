@@ -54,13 +54,12 @@ PEND time cannot be predicted from the request: cluster-wide load drives the lon
 jobs found no model that caught any GPU-queue wait over 1 h. The request still changes the risk:
 
 - GPU memory above the smallest large-GPU class (gmem over 32G there) added 28 points to the chance of waiting
-  over 1 h. Fit under it when the measured peak allows (smaller batch, half precision), never below 1.3 x the
-  measured GPU-memory peak.
+  over 1 h. Ways to fit under it: a smaller batch or half precision.
 - Cutting cores had no average effect. It helps only when the pending reason says the fitting hosts lack cores.
 - Model or host pins shrink the eligible hosts. Drop a pin the job does not need.
 
-Submit through `scripts/pendlog submit --out DIR -- bsub ...` and run `scripts/pendlog started --out DIR` every
-10 to 15 min while jobs pend. Before a batch, `scripts/pend-risk --history jobs.csv --request "<bsub args>"` on
+Submit through `scripts/pendlog submit --out DIR -- bsub ...` (when to run `pendlog started`: `monitoring.md`).
+Before a batch, `scripts/pend-risk --history jobs.csv --request "<bsub args>"` on
 `pendlog export` output or an accounting CSV prints how often similar recent jobs waited over 1 h, never an ETA.
 
 ## Ledger

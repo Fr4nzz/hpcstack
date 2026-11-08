@@ -66,8 +66,8 @@ bkill <id>               # exact id only. bkill -s USR2 <id> sends a signal inst
 - When an upstream may end non-zero with usable output (arrays with killed and retried elements, jobs whose
   cleanup you don't control), use `ended(<id>)` and have the dependent check every required output (status
   file, receipts, counts) first and exit non-zero if any is missing.
-- When an upstream job EXITs, its `done()` dependents stay PEND forever ("Dependency condition invalid or never
-  satisfied"). In the same step, `bkill` them by exact id, then resubmit the chain once the cause is fixed.
+- Dependents of a failed upstream pend with "Dependency condition invalid or never satisfied". Resubmit the
+  chain once the cause is fixed.
 - A dependency fails ("No matching job found") when the referenced job records have been purged, not because
   elements were killed. Use the real original or retry ids, and re-check dependents with `bjobs -l` after any
   kill.
@@ -75,15 +75,13 @@ bkill <id>               # exact id only. bkill -s USR2 <id> sends a signal inst
 ## Why pending: "Affinity ... not enough processor units"
 
 Some sites print this, or "no suitable hosts", whenever no host passes the whole request: CPU binding, a
-GPU-memory (`gmem`) filter that only the largest GPUs meet, the memory request, or a full queue. Never shrink
-cores or data workers below the measured best just to start sooner: one team spent 140 GPU-hours training at 2
-to 23 % GPU use that way.
+GPU-memory (`gmem`) filter that only the largest GPUs meet, the memory request, or a full queue.
 
 1. Read every reason and host in `bjobs -p -l <id>`, not just the first line.
 2. Check free GPU memory per host (`bhosts -gpu -l`, `lshosts -gpu`) and the hosts the queue reaches
    (`bqueues -l <q>`).
 3. Change one thing at a time, GPU memory first, then cores, then memory. Relax only what is over-strict:
-   lower `gmem` to the measured peak plus a margin (about 1.3x), or replace it with a GPU-model constraint
+   lower `gmem` to the sizing rule's value, or replace it with a GPU-model constraint
    (`gmodel=`, checked with `lshosts -gpu`) whose memory covers that peak. Never drop the GPU-memory floor: the
    job can then land on a GPU too small for it and fail with CUDA out of memory.
 
@@ -100,7 +98,7 @@ to 23 % GPU use that way.
 
 | Code or reason | Meaning |
 |---|---|
-| `TERM_MEMLIMIT`, exit 130 or 137 | hit `-M`. Measure peak, set `-M` to 1.3x, or cap the tool (Java `-Xmx`) |
+| `TERM_MEMLIMIT`, exit 130 or 137 | hit `-M`. Re-size from the measured peak, or cap the tool (Java `-Xmx`) |
 | `TERM_RUNLIMIT`, exit 140 | hit `-W` |
 | `TERM_OWNER` | you killed it |
 | `TERM_CPULIMIT` | CPU time limit |
