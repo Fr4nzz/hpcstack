@@ -1,6 +1,6 @@
 ---
 name: fair-use-preflight
-description: A 60-second fairness and safety checklist before anything is submitted to a shared cluster, ending with a short receipt. Use when the user says "before I submit", "is this ok to launch?", "launch it", "submit it", "run it on the cluster", or right before you run bsub, sbatch, a job array, a Nextflow or Snakemake run, or open an interactive allocation.
+description: Fairness and safety checklist for anything sent to a shared cluster. Use when the user says "before I submit", "is this ok to launch?", "launch it", "submit it", "run it on the cluster", or right before you run bsub, sbatch, a job array, a Nextflow or Snakemake run, or open an interactive allocation.
 ---
 
 # Fair-use preflight
@@ -8,8 +8,9 @@ description: A 60-second fairness and safety checklist before anything is submit
 Goal: nothing goes to the scheduler without a measured request, a time limit, a storage plan and a recovery
 plan. It takes a minute. Skipping it is how a 1-core tool ends up holding 18 cores and 80 GB for a day.
 
-Stop rule: if any item is "no" or "unknown", fix it or say so to the user before submitting. Don't block on
-items that don't apply (mark them n/a).
+Stop rule: resolve every "no" or "unknown" before submitting. Only an unmeasured first run is exempt (first
+item). Report any other unfixable item to the user and wait for their decision. Mark items that don't
+apply n/a.
 
 ## Checklist
 
@@ -27,7 +28,7 @@ items that don't apply (mark them n/a).
 
 **Arrays and volume**
 - [ ] Independent units are an array with a concurrency cap (`%N`).
-- [ ] No duplicate or speculative submissions. You checked `bjobs`/`squeue` for an identical job first.
+- [ ] No duplicate or speculative submissions. Checked `bjobs`/`squeue` for an identical job first.
 
 **Storage**
 - [ ] Quota checked, user and group, bytes and files (`storage-footprint/scripts/quota_report.sh --gate`).
