@@ -30,7 +30,8 @@ about the longest unit.
 
 Find the longest unit before submitting, start it first (first line of the manifest), and check it against the
 queue's run limit. If a workflow engine must run inside one allocation, set its failure policy so one failed unit
-does not stop the others (Snakemake `--keep-going`, make `-k`, Nextflow `errorStrategy 'finish'`). Without it the job still holds every core until the running units end, then fails.
+does not stop the others (Snakemake `--keep-going`, make `-k`, Nextflow `errorStrategy 'finish'`). Without it the
+job still holds every core until the running units end, then fails.
 
 ## Threads must match cores
 

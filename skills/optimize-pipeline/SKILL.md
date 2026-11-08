@@ -44,8 +44,8 @@ Ask the user before any change of class D or any recipe change.
    - **Memory as the scheduler counts it** (cgroup RSS, not page cache). Read `memory.stat` and per-process
      PSS before any memory change. Run long enough to see growth.
    - **Silent fallbacks** in the logs: "falling back to CPU", "retrying", warnings that repeat per step. On
-     a shared GPU that fills up, a step can fall back to the CPU after a CUDA out-of-memory error. Lower that step's peak GPU memory (for
-     example, process it in chunks) so it stays on the GPU.
+     a shared GPU that fills up, a step can fall back to the CPU after a CUDA out-of-memory error. Lower that
+     step's peak GPU memory (for example, process it in chunks) so it stays on the GPU.
 4. **Classify every change and verify it the cheap way:**
    - **E, exact**: output identical. Thread counts, skipping work whose result is known, vectorising,
      chunking, prefetch depth, allocator settings. Verify by identity: `cmp`, `md5sum` of sorted output,
