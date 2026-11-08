@@ -20,8 +20,9 @@ equivalents: `references/slurm.md`.
 
 The login node is shared by everyone. Run only light commands there: `bjobs`, `bqueues`, `lfs quota`, a bounded
 `stat`, editing files, `bsub`. Scans (`du`, `find`, `ls -R`), compression, `pip install`, builds and anything over
-a minute of CPU go in a job, and so do watchdogs. Never `tmux kill-server` there: it ends every session you have,
-including other agents' live ones. Close stale tmux sessions one at a time, each checked to be an idle shell.
+a minute of CPU go in a job. Watchdogs run inside the allocation, never on the login node or from cron. Never
+`tmux kill-server` there: it ends every session you have, including other agents' live ones. Close stale tmux
+sessions one at a time, each checked to be an idle shell.
 
 ## Interactive or batch
 
@@ -62,8 +63,10 @@ Raw fields, flags, the ledger and the preflight receipt: `references/sizing.md`.
   one (8.5 busy cores: `-n 10`, not 16).
 - **Walltime**: about 1.5 x the observed p95 run time. Shorter walltimes backfill sooner.
 - **GPU memory**: always set `gmem`, at about 1.3 x the measured GPU-memory peak (a modest floor such as 16G before
-  one exists). A CUDA OOM is not `TERM_MEMLIMIT`. A request above the smallest large-GPU class sharply raises the
-  chance of waiting over an hour, so fit under it when the measured peak allows.
+  one exists). Host RAM and VRAM are separate budgets: a CUDA OOM is not `TERM_MEMLIMIT`. A request above the
+  smallest large-GPU class sharply raises the chance of waiting over an hour, so fit under it when the peak allows.
+- **GPU busy**: a GPU under about 80 % busy is an input-pipeline problem (`optimize-pipeline`), not a reason for a
+  second GPU. In a throughput array, each element's receipt records the GPU model and its measured rate.
 - **Pilots don't scale for free.** Fit the peak against input size, or probe a full-size shard. Mixed inputs get
   one pilot per input class (its largest element). A peak from another code path is not a measurement.
 - **Every resubmit is re-sized** at submit time: reused scripts keep their old numbers.
@@ -77,12 +80,14 @@ Raw fields, flags, the ledger and the preflight receipt: `references/sizing.md`.
 - Genomics batch work (arrays per sample, thread flags, Java heaps, reads to linkage map): `references/genomics.md`.
 
 **Preflight.** Before anything goes to the scheduler, resolve every "no" (an unmeasured first run goes with a
-modest request, labelled as such) and write the receipt to `PREFLIGHT.md` in the run folder:
+modest request, labelled as such). If you cannot resolve one, report it and wait for the user. Write the receipt
+to `PREFLIGHT.md` in the run folder:
 
 1. Cores, memory and walltime cite a measurement. `-W`, `-M` and `rusage` are set. Threads flag equals cores.
 2. The shortest queue that fits. GPUs justified, GPU-hours stated. Shared GPU mode unless exclusive was measured
    to be needed and the user agreed.
-3. Independent units are an array with a cap (`%N`). No duplicate or speculative copies (check `bjobs` first).
+3. Independent units are an array with a cap (`%N`) of tens, not hundreds (unless tasks are tiny and the queue
+   is quiet), so it never takes a whole queue. No duplicate or speculative copies (check `bjobs` first).
 4. Quota checked, bytes and files (`scripts/quota_report.sh <mount> <group> --gate`). Expected new files written
    down, packed above about 50 per run. Temp files on node-local disk. Output to a new versioned directory.
 5. The job writes `status.json`, checkpoints, traps the walltime warning and cleans up. Dependencies use exact ids.
@@ -110,7 +115,7 @@ Job scripts start from `references/job-script-template.sh`:
 - One bad input must not fail a whole shard: record per-item errors with the item id, fail only above a stated
   rate. CPU-only stages go in CPU jobs, not inside a GPU allocation.
 - Replace a script that a running job uses by writing a new file and `mv`. Lint with `bash -n` and `shellcheck`.
-  Pass parameters as arguments or `-env`, and record them with the git commit in the output folder.
+  A comment after a line-continuation backslash silently drops every later argument. Pass parameters as arguments or `-env`, and record them with the git commit in the output folder.
 
 ## Workflow managers
 
@@ -145,7 +150,8 @@ before a long wait. Expiry blinds monitoring but does not kill jobs: re-authenti
 ## Storage and cleanup
 
 Bytes and files (inodes) are separate quotas, and on team scratch the file count is often the tighter one.
-Deleting a 500 GB tar frees one inode. Packing 30,000 loose images into one tar frees 29,999.
+Deleting a 500 GB tar frees one inode. Packing 30,000 loose images into one tar frees 29,999. Prioritise by file
+count when the inode quota is tight, by bytes when the byte quota is.
 
 1. Quota first: `scripts/quota_report.sh <mount> [group]` reads `lfs quota`, walks nothing, and shows whether the
    user or the team is at the limit. Then ask which known trees (project dirs, run roots) are finished.

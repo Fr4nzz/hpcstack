@@ -16,7 +16,7 @@ the walltime. Scheduler idle detection rarely helps: it is often undefined on GP
    - the job's GPUs (`CUDA_VISIBLE_DEVICES`) were below `HPC_GPU_IDLE_PCT` (5 %) at every sample in that window.
      A failed `nvidia-smi` counts as busy, and so does another tenant's work on a shared GPU.
 
-Each decision is logged to `~/.hpc-session/<jobid>.log`. If CPU cannot be measured, the watchdog never kills and
+Each decision is logged to `~/.hpc-session/<jobid>.log`, so a released job's log says why. If CPU cannot be measured, the watchdog never kills and
 the walltime is the only backstop. A GPU pause with low CPU that lasts longer than the CPU window counts as idle,
 so raise `HPC_CPU_WINDOW_S` for jobs with long CPU-light pauses (large evaluations, slow uploads). All settings are
 listed in the script header (`--help`).
