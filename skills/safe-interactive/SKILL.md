@@ -5,12 +5,9 @@ description: Open interactive cluster allocations (CPU or GPU shells) that relea
 
 # Safe interactive allocations
 
-> **Tested on LSF, not yet on SLURM.** On an LSF cluster (October 2026) `scripts/hpc-session` read the job's
-> cgroup CPU counter, kept the job alive while it used CPU and while the user typed, and released it about
-> two minutes after the idle limit, on a CPU queue and on a GPU queue (idle GPU). In November 2026 it kept a
-> GPU-bound job alive (100 % GPU, 0.005 cores CPU, no typing for 11 min, with 20 s GPU pauses every minute)
-> and released it about 3 minutes after the GPU work stopped. Not yet tested: `hpc-session-slurm`. On a new site, first run once with `HPC_DRY_RUN=1 HPC_IDLE_MIN=5`
-> and check `~/.hpc-session/<jobid>.log` shows a `cpu_source=v1:` or `v2:` path.
+> **Tested on LSF (CPU and GPU queues), not on SLURM.** On a new site, first run once with
+> `HPC_DRY_RUN=1 HPC_IDLE_MIN=5` and check that `~/.hpc-session/<jobid>.log` shows a `cpu_source=v1:` or
+> `v2:` path. Test details: `references/test-log.md`.
 
 Problem: an agent opens an interactive allocation in tmux, then stops (usage limit, crash, laptop sleep,
 expired login). The allocation, often a GPU, idles until its walltime. Scheduler idle detection rarely
@@ -56,10 +53,7 @@ Goal: no interactive allocation outlives its usefulness by more than about 30 mi
 
    A GPU pause with low CPU that lasts longer than the CPU window (`HPC_CPU_WINDOW_S`, default 300 s) still
    counts as idle, so a typing-free job with long CPU-light pauses (large evaluations, slow checkpoint
-   uploads) can be released. Raise the window for such jobs. The busy-GPU case was tested with shortened
-   settings (`HPC_IDLE_S=180 HPC_CPU_WINDOW_S=120`): the job survived short GPU pauses and was released about
-   3.5 min after the work stopped. Not yet tested: several GPUs in one job, another tenant on the same GPU,
-   and the scheduler's own pre-kill warning.
+   uploads) can be released. Raise the window for such jobs.
 
 Settings are environment variables, listed in the script header (`HPC_IDLE_MIN`, `HPC_CPU_IDLE_CORES`,
 `HPC_GPU_IDLE_PCT`, `HPC_DRY_RUN`, ...).
@@ -72,9 +66,9 @@ Settings are environment variables, listed in the script header (`HPC_IDLE_MIN`,
   allocation is gone. If it is still running after 30 s, check the id is yours and kill that exact id
   (releasing your own idle allocation is an authorised reason). Check the reply, then poll again until the
   job shows DONE/EXIT (SLURM: COMPLETED/CANCELLED) or is confirmed absent. If it doesn't resolve, keep the
-  tmux session, keep monitoring and report. (3) Only then close that one tmux session (`tmux kill-session -t <name>`). Closing tmux does not
-  reliably end the job: one allocation stayed RUN and idled a GPU for 2 h 40 min after `exit` plus
-  `kill-session`, once the agent hit its usage limit.
+  tmux session, keep monitoring and report. (3) Only then close that one tmux session
+  (`tmux kill-session -t <name>`). Closing tmux does not reliably end the job (one GPU idled 2 h 40 min
+  after `exit` plus `kill-session`).
 - Never `tmux kill-server` on a shared login node. It ends every session you have there, including other
   agents' live ones. Close stale sessions one by one after checking that each pane is an idle shell with no
   child processes. Idle sessions pile up: one user had 36 left over from a single month.
