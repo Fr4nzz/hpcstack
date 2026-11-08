@@ -67,8 +67,8 @@ Raw fields, flags, the ledger and the preflight receipt: `references/sizing.md`.
 - **Pilots don't scale for free.** Fit the peak against input size, or probe a full-size shard. Mixed inputs get
   one pilot per input class (its largest element). A peak from another code path is not a measurement.
 - **Every resubmit is re-sized** at submit time: reused scripts keep their old numbers.
-- **Count the hosts** before several GPU runs: the hosts that pass the GPU filter against the runs that compete
-  for them, your own included. If runs exceed hosts, order them or fit the next GPU class.
+- **Count the hosts** that pass the GPU filter before several GPU runs. If your runs exceed them, order the runs
+  or fit the next GPU class.
 - Never set `-M` below the measured peak, or cores below the measured best, just to start sooner. Find out why
   the job pends (Recover).
 - Append each verified run to the project's ledger, and read it before sizing a new job.
@@ -110,7 +110,7 @@ Job scripts start from `references/job-script-template.sh`:
 - One bad input must not fail a whole shard: record per-item errors with the item id, fail only above a stated
   rate. CPU-only stages go in CPU jobs, not inside a GPU allocation.
 - Replace a script that a running job uses by writing a new file and `mv`. Lint with `bash -n` and `shellcheck`.
-- Pass parameters as arguments or `-env`, and write them, the git commit and tool versions into the output folder.
+  Pass parameters as arguments or `-env`, and record them with the git commit in the output folder.
 
 ## Workflow managers
 
@@ -132,9 +132,8 @@ Docs: [Nextflow](https://www.nextflow.io/docs/latest/), [nf-core](https://nf-co.
 
 ## Wait and monitor
 
-The job writes `status.json` (phase, progress, last metric, ETA, time). Wait with one background watcher that
-polls every 60 s and exits on a terminal state, a long PEND or an error, never a series of `sleep` calls or
-re-armed loops. The loop, long waits, stragglers and handoffs: `references/monitoring.md`.
+The job writes `status.json` (phase, progress, last metric, ETA). Wait with one background watcher that polls
+every 60 s and exits on a terminal state, a long PEND or an error, never with repeated `sleep` calls. The loop, long waits, stragglers and handoffs: `references/monitoring.md`.
 
 `DONE` is a scheduler state, not a verdict. A job is finished when its outputs exist with the expected count and
 checksums and the log has no silent fallback ("falling back to CPU", "retrying"). A worker's DONE says nothing
@@ -178,8 +177,8 @@ command must print nothing else on stdout.
 - When an upstream fails, its `done()` dependents pend forever: kill them by exact id in the same step.
 - To swap your own running training for more valuable work, use a worker task and `queue_worker.py preempt`
   (`cluster-autoresearch`) instead of `bkill` plus a new job.
-- `TERM_MEMLIMIT` (exit 130 or 137): read the peak, find what grew, re-size. Exit 140 is the walltime. Resume into
-  a new attempt folder from the last published checkpoint (`references/checkpointing.md`).
+- After `TERM_MEMLIMIT` (exit 130 or 137) or a walltime kill (140), re-size from the measured peak or rate and
+  resume into a new attempt folder from the last published checkpoint (`references/checkpointing.md`).
 
 ## Done means
 

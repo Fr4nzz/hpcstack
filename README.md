@@ -2,121 +2,72 @@
 
 Agent skills for shared clusters: faster, cheaper, and fairer to everyone else in the queue.
 
-These skills teach a coding agent (Claude Code, Codex, or anything that reads `SKILL.md`) how to work on a
-shared batch cluster the way a careful colleague would. They submit jobs that ask for what they use, measure
-before they optimise, clean up after themselves, and stop when their budget is spent. LSF is the primary
-scheduler and SLURM gets the same treatment in every skill.
-
-They were written on a large LSF genomics and imaging cluster, from real jobs that wasted real core-hours.
-The `examples/` folder holds a ledger template and two short worked cases.
+These skills teach a coding agent (Claude Code, Codex, or anything that reads `SKILL.md`) to work on a shared
+batch cluster the way a careful colleague would. Jobs ask for what they use, measure before they optimise, clean
+up after themselves, and stop when their budget is spent. LSF is the primary scheduler, with SLURM equivalents.
+They come from real jobs on a large LSF cluster.
 
 ## Skills
 
 | Skill | Say | What it does |
 |---|---|---|
-| `cluster-ops` | "run this on the cluster" | Submit, monitor and recover jobs. The interactive-versus-batch rule. LSF and SLURM. |
-| `right-size-jobs` | "how much memory should I ask for?" | Reads bjobs/bacct/sacct, reports efficiency and the next request. |
+| `cluster-ops` | "run this on the cluster", "how much memory?", "give me a GPU shell", "what can I delete?" | Submit, size, monitor and recover jobs. Interactive sessions that release themselves, a preflight checklist, inode-first storage audits, workflow managers. |
 | `optimize-pipeline` | "make this faster" | Profile, pre-register hypotheses, separate exact from distribution-changing changes, measure. |
 | `cluster-autoresearch` | "run experiments overnight" | A budgeted keep-or-discard loop with `results.tsv` and `progress.png`. |
-| `safe-interactive` | "give me a GPU shell" | An interactive allocation that releases itself when you stop. |
-| `storage-footprint` | "what can I delete?" | Inode-first disk audit that doesn't hammer the metadata server. |
-| `genomics-jobs` | "run bwa on 500 samples" | Arrays, thread flags, Java heap versus `-M`, no small-file floods. |
-| `fair-use-preflight` | "before I submit" | A 60-second fairness checklist that ends with a receipt. |
-| `nextflow-on-lsf` | "run nf-core on the farm" | Profiles, labels, retries, work-dir hygiene, sizing from the trace. |
-
-Several skills hand off to each other. `fair-use-preflight` calls `right-size-jobs`, `cluster-ops` sends
-interactive work to `safe-interactive`, and `optimize-pipeline` ends in `right-size-jobs`. Install them all.
 
 ## Install
 
-**Claude Code (plugin)**
 ```bash
-claude plugin marketplace add <owner>/hpcstack
-claude plugin install hpcstack@hpcstack
+claude plugin marketplace add <owner>/hpcstack && claude plugin install hpcstack@hpcstack   # Claude Code
+codex plugin marketplace add <owner>/hpcstack && codex plugin add hpcstack@hpcstack         # Codex
+npx skills@latest add <owner>/hpcstack                                                      # other agents
 ```
 
-**Codex (plugin)**
-```bash
-codex plugin marketplace add <owner>/hpcstack
-codex plugin add hpcstack@hpcstack
-```
-
-**Any agent via skills.sh**
-```bash
-npx skills@latest add <owner>/hpcstack     # choose the agent interactively, or pass -a <agent>
-```
-
-**Manual copy or symlinks**
-```bash
-git clone https://github.com/<owner>/hpcstack
-cp -R hpcstack/skills/* ~/.claude/skills/   # Claude Code
-cp -R hpcstack/skills/* ~/.codex/skills/    # Codex
-# or keep a checkout and symlink it, so `git pull` updates the skills:
-hpcstack/scripts/link-skills.sh             # see --help for targets
-```
-
-Pick one method per agent. Installing twice gives you every skill twice.
-
-The helper scripts need `bash` and `python3` (3.8 or newer). `plot_progress.py` also needs `matplotlib`.
+Or clone the repo and run `scripts/link-skills.sh` (see `--help`) to symlink the skills, so `git pull` updates
+them. Pick one method per agent: installing twice gives you every skill twice. The helper scripts need `bash` and
+`python3` (3.8 or newer). `plot_progress.py` also needs `matplotlib`.
 
 ## Tell the agent where it is
 
-Skills stay generic. Cluster facts live in a site profile, and your personal values live in your own agent
-instructions. Add something like this to `CLAUDE.md` or `AGENTS.md`:
+Cluster facts live in a site profile (`sites/`), and personal values in your own `CLAUDE.md` or `AGENTS.md`:
 
 ```text
 Cluster: <site> (see hpcstack sites/<site>.md). Scheduler: LSF.
 My group: <group>. Scratch: /path/to/scratch/<group>/<user>. Login node: <login-node>.
 ```
 
-`sites/` holds a template and one example profile. If your cluster has no profile, the skills run a short
-discovery (`lsid` or `sinfo`, `bqueues`, `lfs df`, `mount`) and ask you to confirm the result. Pull requests
-with new site profiles are welcome (see `CONTRIBUTING.md`).
+Without a profile, the skills run a short read-only discovery and ask you to confirm the result.
 
-## Philosophy
+## Principles
 
-- **Set goals and guardrails, not recipes.** A skill says what done looks like, what must never happen, how
-  much it may spend and when to stop. It leaves the method to the agent. Over-constrained skills block the
-  good ideas that a capable model brings.
-- **Verify with evidence.** "DONE" is a scheduler state, not a result. Every skill asks for proof observed in
-  the session: exit codes, log tails, checksums, counts, a before-and-after measurement. Anything the agent
-  could not confirm gets listed as such.
-- **Measure, then change.** Most waste we found came from boring causes that profiling found and guessing
-  did not: a tool using one core out of two, a JVM sizing itself for the whole node, a thread pool per worker.
-- **Be a good neighbour.** A shared cluster is a commons. Ask for what you use, cap your arrays, keep scans
-  off the login node and off the metadata server, release idle allocations, and state the cost before you
-  spend it.
-- **Short skills, detail on demand.** Each `SKILL.md` stays under about 150 lines. Its description is a
-  trigger ("Use when..."), and longer material sits in `references/` for the agent to open when needed.
+- Set goals and guardrails, not recipes: what done looks like, what must never happen, the budget, when to stop.
+- "DONE" is a scheduler state, not a result. Every claim needs evidence from the session: exit codes, log
+  tails, checksums, counts, a before-and-after measurement.
+- Measure, then change. Most waste came from boring causes that profiling found and guessing did not.
+- A shared cluster is a commons. Ask for what you use, cap arrays, keep scans off the login node, release idle
+  allocations, and state the cost before you spend it.
 
 ## Status
 
-Version 0.1. The skills come from real use, but the helper scripts are new:
+Version 0.2. Tested on real LSF jobs: `hpc-session` (CPU and GPU queues, including a busy GPU with idle CPU),
+`jobeff`, `quota_report.sh`, and `queue_worker.py` (failing, timed-out and crashing tasks, `preempt`, idle exit,
+STOP, `bkill`, `bkill -s USR2`, one worker per scenario). Tested only with fake commands or synthetic inputs:
+`pendlog`, `pend-risk`, `listing_job.sh`, `analyse_listing.py`, `results_tsv.py`, `plot_progress.py`, and in
+`queue_worker.py` the resume on the next worker, the USR2 grace and the `--est-min` fit check. Not yet tested:
+several workers sharing one queue, and every SLURM path. Reports of what breaks on your cluster are the most
+useful issues you can open.
 
-- `safe-interactive/scripts/hpc-session` was tested on real LSF jobs (CPU and GPU queues): it stays out of
-  the way while the job works or the user types, and releases the job once both stop. A busy GPU with idle
-  CPU keeps the job (tested with shortened idle settings, not the 30 min default). Not yet tested on SLURM,
-  with several GPUs in one job, or with another tenant on the same GPU.
-- `jobeff` and `quota_report.sh` were run against live LSF and Lustre. `queue_worker.py` ran LSF batch
-  workers: failing, timed-out and crashing tasks were recorded without stopping the queue, the worker exited
-  0 and its `done()` dependent ran. A worker signalled with USR2 exited 140, so its `done()` dependent never
-  fired. Several workers sharing one queue are not yet tested. `preempt` (stop one of your own running
-  tasks, re-queue it with a resume command, and run a high-priority task in the same allocation), the idle
-  exit, STOP, `bkill` and `bkill -s USR2` were tested on LSF farm22 on 7 Nov 2026, one worker per scenario.
-  Resuming a stopped task on the next worker, the USR2 grace and the `--est-min` fit check that followed
-  from that test are tested on synthetic tasks only (`tests/test_queue_worker.py`).
-- `pendlog` (queue snapshots and PEND times at submit) and `pend-risk` (share of similar recent jobs that
-  waited over 1 h, no ETA) are UNTESTED on a cluster: tested with fake LSF commands and synthetic histories
-  only (`tests/test_pendlog.py`). Their SLURM paths are untested.
-- `listing_job.sh`, `analyse_listing.py`, `results_tsv.py` and `plot_progress.py` were tested on synthetic
-  inputs (fake `lfs`, local directories), not yet on a cluster. SLURM paths are untested.
+## Contributing
 
-Reports of what breaks on your cluster are the most useful issues you can open.
-
-## Make them yours
-
-These are starting points. Edit them. Keep personal settings (group, scratch path, preferred queues) in your
-`CLAUDE.md` or `AGENTS.md` so you can update the skills without losing them.
+- Run `scripts/lint.sh`, `scripts/scrub_check.sh` and `uv run --with pytest python -m pytest -q` before a pull
+  request. `git config core.hooksPath .githooks` runs the first two on every commit.
+- A site profile starts from `sites/TEMPLATE.md` and holds only public or read-only-checkable facts.
+- A skill's `SKILL.md` has frontmatter (`name` equal to the folder, a `description` that says "Use when..."),
+  stays within its budget in `scripts/word-budget.json`, and has `agents/openai.yaml`. Detail goes in
+  `references/`. Scripts run with `--help`, and anything not run on a real cluster is marked UNTESTED.
+- This repo is public: no user names, group names, home or scratch paths, host names, job ids, quota levels or
+  chat transcripts. Put your own patterns in `.scrub-patterns.local` (git-ignored), one regex per line.
+- Plain sentences, no em dashes, no semicolons in prose. Savings claims need measured numbers.
 
 ## License
 

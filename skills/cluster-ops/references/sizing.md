@@ -13,29 +13,16 @@
 To audit a project, run `jobeff --lsf-log` over every existing log first. Sum core-hours allocated, used, and
 spent in failed or killed jobs, then fix the steps that lose the most.
 
-## LSF fields
+## Raw sources
 
-```bash
-bjobs -a -o 'jobid stat queue slots cpu_used run_time max_mem avg_mem memlimit idle_factor exit_code' -json <id>
-```
-
-- `SLOTS` cores, `CPU_USED` CPU seconds, `RUN_TIME` wall seconds, `MAX_MEM` peak (cgroup RSS on most sites),
-  `MEMLIMIT` the `-M` limit (empty means the queue default applied), `IDLE_FACTOR` cputime / runtime.
-- `bjobs -a` keeps finished jobs only for the site's clean period (often an hour). After that use `bacct -l <id>`
-  (run time = TURNAROUND - WAIT, cores from "Dispatched N Task(s)"). Give `bacct` job ids, not a wide time range.
-- Every LSF `.out` file ends with a "Resource usage summary" (CPU time, Max Memory, Run time). Cores come from
-  "executed on host(s) <8*node>" (no `N*` means 1). This is often the most reliable source months later, and
-  `jobeff --lsf-log` parses it.
-
-## SLURM fields
-
-```bash
-sacct -j <id> -P -o JobID,State,Elapsed,TotalCPU,AllocCPUS,ReqMem,MaxRSS,Timelimit
-seff <id>
-```
-
-`MaxRSS` is per step: take the maximum across `.batch`, `.extern` and numbered steps. `ReqMem` ending in `c`
-(older versions) is per core, so multiply by cores.
+- LSF running or recent: `bjobs -a -o 'jobid stat slots cpu_used run_time max_mem memlimit idle_factor exit_code'
+  -json <id>`. An empty `MEMLIMIT` means the queue default applied. `bjobs -a` keeps finished jobs only for the
+  site's clean period, often an hour. After that, `bacct -l <id>` (run time = TURNAROUND - WAIT), given job ids,
+  not a wide time range.
+- Every LSF `.out` file ends with a "Resource usage summary", and cores come from "executed on host(s)
+  <8*node>" (no `N*` means 1). It is often the most reliable source months later.
+- SLURM: `sacct -j <id> -P -o JobID,State,Elapsed,TotalCPU,AllocCPUS,ReqMem,MaxRSS` or `seff <id>`. `MaxRSS` is
+  per step, so take the maximum over steps.
 
 ## Nextflow trace
 
@@ -53,9 +40,8 @@ and use the p95, not one outlier:
 
 ## Wait risk
 
-PEND time cannot be predicted from the request: cluster-wide load drives the long waits, and accounting does not
-keep it. A study of 10,490 LSF jobs found no model that caught any GPU-queue wait over 1 h. The request still
-changes the risk:
+PEND time cannot be predicted from the request: cluster-wide load drives the long waits. A study of 10,490 LSF
+jobs found no model that caught any GPU-queue wait over 1 h. The request still changes the risk:
 
 - GPU memory above the smallest large-GPU class (gmem over 32G there) added 28 points to the chance of waiting
   over 1 h. Fit under it when the measured peak allows (smaller batch, half precision), never below 1.3 x the
@@ -69,9 +55,9 @@ Submit through `scripts/pendlog submit --out DIR -- bsub ...` and run `scripts/p
 
 ## Ledger
 
-Keep one in the project, not in this repo. One row per verified run (exit 0, outputs checked). Peak memory is what
-the scheduler measured. Note if the job hit its limit, since the true peak is then unknown. When a row is
-superseded (new tool version, new input type), add a new row instead of editing the old one.
+Keep one in the project. One row per verified run (exit 0, outputs checked), with the peak the scheduler
+measured. Note when a job hit its limit (the true peak is then unknown). A new tool version or input type gets a
+new row, not an edit.
 
 | Date | Task | Input size | Queue | Cores | -M (MB) | GPU | Wall | CPU eff | Peak mem | Throughput | Source |
 |---|---|---|---|---|---|---|---|---|---|---|---|

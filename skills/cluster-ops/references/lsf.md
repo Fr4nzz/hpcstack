@@ -24,7 +24,7 @@ for a running job". Test once on a throwaway `sleep` job. If it fails, choose `-
 | cores on one host | `-n 8 -R "span[hosts=1]"` |
 | memory | `-M 8000 -R "select[mem>=8000] rusage[mem=8000]"` |
 | walltime | `-W 4:00` (hours:minutes) |
-| GPU | `-gpu "num=1:gmem=<n>G"`. Always set `gmem`: on sites where GPUs are shared between jobs, another job may already hold most of a GPU's memory, and a job without a floor can fail at model load. Use about 1.3x a measured GPU-memory peak, no more. Before you have a peak, use a modest floor such as 16G |
+| GPU | `-gpu "num=1:gmem=<n>G"`. On shared GPUs a job without a `gmem` floor can fail at model load because another job holds the memory |
 | logs | `-o logs/%J.out -e logs/%J.err` (arrays: `%J.%I`) |
 | array with cap | `-J 'name[1-500]%50'`, index in `$LSB_JOBINDEX` |
 | dependency | `-w "done(<jobid>)"` on ids. See "Dependencies" below |
@@ -32,14 +32,10 @@ for a running job". Test once on a throwaway `sleep` job. If it fails, choose `-
 | low priority | `-sp 1` |
 | pass parameters | `-env "all,PARAM=value"` or script arguments, never by editing the script |
 
-Exclusive GPU mode blocks co-tenants. Use it only when shared mode is measured to be too slow and the user
-agrees.
-
 ## Inspect
 
 ```bash
 bjobs -w                                         # your jobs
-bjobs -o 'jobid stat queue slots cpu_used run_time max_mem memlimit idle_factor exit_code' -json
 bjobs -l <id>                                    # RESOURCE USAGE, pending reasons
 bjobs -p -l <id>                                 # why pending
 bhist -l <id>                                    # timeline including pend time
@@ -49,9 +45,8 @@ bpeek <id>                                       # stdout so far
 ```
 
 Finished jobs drop out of `bjobs -a` after the site's clean period, and can then be missing from plain `bacct`
-and `bhist -l` too. `bhist -n 10 -l <id>` searches the older event files. Give it a timeout of 120 s or more.
-Read the job's own status file first. The `.out` file of every job ends with a
-"Resource usage summary" (CPU time, max memory, run time). `scripts/jobeff --lsf-log` reads it.
+and `bhist -l` too. Read the job's own status file first, then `bhist -n 10 -l <id>` (timeout 120 s or more).
+The `.out` file's "Resource usage summary" is read by `scripts/jobeff --lsf-log`.
 
 ## Modify and kill
 
@@ -62,8 +57,7 @@ bkill <id>               # exact id only. bkill -s USR2 <id> sends a signal inst
 ```
 
 - `bmod -M` or `-R` on a running job is often refused, and a site esub can refuse `bmod -R` on pending GPU
-  jobs too. Resubmit instead.
-- A successful `bkill` replies that the job "is being terminated". Kill rules are in `cluster-ops`.
+  jobs too. Resubmit instead. A successful `bkill` replies that the job "is being terminated".
 
 ## Dependencies
 
@@ -82,8 +76,8 @@ bkill <id>               # exact id only. bkill -s USR2 <id> sends a signal inst
 
 Some sites print this, or "no suitable hosts", whenever no host passes the whole request: CPU binding, a
 GPU-memory (`gmem`) filter that only the largest GPUs meet, the memory request, or a full queue. Never shrink
-cores or data workers below the measured best just to start sooner. One team lost about 4 days and 140
-GPU-hours training at 2 to 23 % GPU use that way.
+cores or data workers below the measured best just to start sooner: one team spent 140 GPU-hours training at 2
+to 23 % GPU use that way.
 
 1. Read every reason and host in `bjobs -p -l <id>`, not just the first line.
 2. Check free GPU memory per host (`bhosts -gpu -l`, `lshosts -gpu`) and the hosts the queue reaches

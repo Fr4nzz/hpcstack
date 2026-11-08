@@ -9,7 +9,6 @@ and `lfs quota` reads that accounting directly without walking anything.
 | Command | Cost | Note |
 |---|---|---|
 | `lfs quota -u/-g` | tiny | always first |
-| `ls` (no `-l`) | one readdir per directory | cheap on small dirs |
 | `ls -l`, `stat`, `du` | one MDS request per entry, plus one size request per stripe | expensive on big trees |
 | `lfs find DIR -type f` | MDS only | preferred for counting |
 | `lfs find DIR -size +1G` | adds a size request per candidate | size only what you need |
@@ -17,18 +16,14 @@ and `lfs quota` reads that accounting directly without walking anything.
 | gdu, dust, pdu | full walk, in parallel | fine on local NVMe, harsh on a shared MDS |
 
 - Count with `lfs find DIR -type f | wc -l`. Probe one level at a time with `--maxdepth` under `timeout`.
-- For a full picture, walk once in a low-priority 1-core job (`scripts/listing_job.sh`, `-sp`/`--nice`) and
-  analyse the listing many times (`scripts/analyse_listing.py`: top directories by count and bytes, age,
-  extensions, duplicates).
-- Run one scan at a time, also across parallel agents or subagents. Several walks of one filesystem slow each
-  other and everyone else.
-- Prefer your centre's own Lustre guidance where it differs.
+- `scripts/analyse_listing.py` answers top directories by count and bytes, age, extensions and duplicates from
+  one listing.
+- Run one scan at a time, also across parallel agents or subagents. Prefer your centre's own Lustre guidance.
 
 ## Local disk
 
 Check known caches first (`~/.cache/pip`, `~/.cache/uv`, conda pkgs, `~/.cache/huggingface`, container caches,
-`node_modules`). Then one `ncdu -x -o scan.json` or `gdu` scan, cached and reused by every later question. On a
-workstation most of the space freed usually came from caches and history, not from the scan.
+`node_modules`). Then one `ncdu -x -o scan.json` or `gdu` scan, cached and reused by every later question.
 
 ## Typical big wins
 

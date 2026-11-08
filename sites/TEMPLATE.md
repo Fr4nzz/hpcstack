@@ -1,5 +1,11 @@
 # Site profile: <institution> <cluster>
 
+> A site profile is one file of facts about one cluster (scheduler, queues, limits, storage, GPUs), so the
+> generic skills give advice that fits it. A user of that cluster writes it from public docs and read-only
+> commands, and an agent reads it when the user's `CLAUDE.md` or `AGENTS.md` points to it. Copy this file to
+> `sites/<site>-<cluster>.md` and delete this note. Say where each fact comes from, date anything that changes, and
+> leave out internal wiki text, quota levels, other users' usage and login endpoints.
+
 Last checked: <YYYY-MM-DD>. Sources: <links to public docs>, plus read-only commands run by a user.
 Re-verify anything dated more than 30 days ago before relying on it.
 

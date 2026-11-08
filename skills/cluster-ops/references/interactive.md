@@ -1,8 +1,7 @@
 # Safe interactive sessions
 
-An agent that opens an interactive allocation in tmux and then stops (usage limit, crash, expired login) leaves
-the allocation, often a GPU, idle until its walltime. Scheduler idle detection rarely helps: many sites do not
-define it on GPU or interactive queues, it only notifies, and its ratio is cumulative over the whole job.
+An agent that stops (usage limit, crash, expired login) leaves its interactive allocation, often a GPU, idle until
+the walltime. Scheduler idle detection rarely helps: it is often undefined on GPU queues and only notifies.
 
 ## Three layers
 
@@ -30,7 +29,7 @@ On a new site, run once with `HPC_DRY_RUN=1 HPC_IDLE_MIN=5` and check that the l
 - Closing tmux does not reliably end the job: one GPU idled 2 h 40 min after `exit` plus `kill-session`. Confirm
   the release with the scheduler, as in the SKILL.md ending order. If the job does not resolve, keep the tmux
   session, keep monitoring and report.
-- An agent-side stop hook that kills recorded jobs is a bonus, not a guarantee: it does not fire on every stop.
+- An agent-side stop hook that kills recorded jobs is a bonus: it does not fire on every stop.
 
 Bad: `bsub -Is -q <gpu-queue> -gpu "num=1" -W 12:00 bash`, then the agent hits its usage limit. 12 GPU-hours idle.
 Good: `hpc-session` with `-W 2:00`. The agent stops, and the watchdog releases the GPU 30 minutes later.

@@ -22,13 +22,12 @@ documentation.
 
 ## Reads to linkage map
 
-The pipeline that produced these rules went from raw reads through alignment, a VCF and quality control to a
-linkage map with Lep-MAP3 (pedigree recombination).
+From a pedigree recombination study: raw reads, alignment, a VCF, QC, then a linkage map with Lep-MAP3.
 
 - Align per sample as an array (sort and index in the same task), call per chromosome or interval as an array,
   then merge. Run QC on the merged VCF in its own cheap job, and keep the filter thresholds with the output.
-- Steps differ in shape, so one job for the whole pipeline wastes most of its allocation. Per-chromosome
-  likelihood steps and per-linkage-group ordering are arrays of 1-core tasks. Single-pass steps are single jobs.
+- Steps differ in shape, so one job for the whole pipeline wastes most of its allocation. Per-chromosome and
+  per-linkage-group steps are arrays of 1-core tasks. Single-pass steps are single jobs.
 - The longest linkage group sets the wall time (groups varied from under an hour to 32 h). One task per group
   lets them all start at once.
 - `numThreads=2` gave about 1.05 cores per JVM in every measured ordering run. Time one large group with 1 and 2
