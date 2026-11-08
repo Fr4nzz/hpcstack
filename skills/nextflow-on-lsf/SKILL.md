@@ -11,14 +11,15 @@ resources instead of padding everything, and the work directory does not eat the
 ## Run the head job inside a batch job
 
 The Nextflow driver runs for the whole pipeline. Put it in a small, long batch job, not on the login node.
-The nf-core documentation for one large LSF site uses 2 cores and 8 GB with a fixed JVM heap:
+The nf-core documentation for one large LSF site uses 2 cores and 8 GB. Its example heap is also 8 GB, which leaves the JVM no room, so this one keeps the heap at
+about 0.8 x `-M` (`genomics-jobs`):
 
 ```bash
 #!/bin/bash
 #BSUB -q <long-or-oversubscribed-queue> -n 2 -M 8000 -R "select[mem>=8000] rusage[mem=8000]"
 #BSUB -o logs/nf.%J.out -e logs/nf.%J.err
 module load <nextflow-module>/<version> <singularity-module>     # pin versions
-export NXF_OPTS="-Xms8G -Xmx8G" NXF_ANSI_LOG=false
+export NXF_OPTS="-Xms1G -Xmx6G" NXF_ANSI_LOG=false
 nextflow run nf-core/<pipeline> -r <release> -profile <site>,singularity \
   -w /path/to/scratch/work -c my.config -with-trace -with-report -resume
 ```
