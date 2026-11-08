@@ -3,10 +3,11 @@
 #
 #   scripts/lint.sh
 #
-# Checks: SKILL.md frontmatter (name = folder, description with "Use when"), SKILL.md length (<= 200 lines),
-# agents/openai.yaml present, plugin.json lists exactly the skill folders, JSON validity, `bash -n` and
-# `shellcheck` (if installed) on shell scripts, Python syntax of Python scripts, executable bits on helper
-# scripts, no em dashes anywhere, no semicolons in Markdown prose (code spans and blocks are ignored).
+# Checks: SKILL.md frontmatter (valid YAML, name = folder, description with "Use when"), SKILL.md length
+# (<= 150 lines, cluster-ops <= 200), agents/openai.yaml present, plugin.json lists exactly the skill folders,
+# JSON validity, `bash -n` and `shellcheck` (if installed) on shell scripts, Python syntax of Python scripts,
+# executable bits on helper scripts, no em dashes anywhere, no semicolons in Markdown prose (code spans and
+# blocks are ignored).
 set -Eeuo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -42,6 +43,16 @@ for s in skills:
     if not m:
         err(f"{p}: no YAML frontmatter"); continue
     fm = dict(re.findall(r"^(\w+):\s*(.*)$", m.group(1), re.M))
+    for k, v in fm.items():
+        if v[:1] not in ("'", '"') and (": " in v or " #" in v or v[:1] in "[]{}&*!|>%@`"):
+            err(f"{p}: frontmatter {k} is not valid plain YAML (': ', ' #' or a leading special character). Quote it or reword")
+    try:
+        import yaml
+        yaml.safe_load(m.group(1))
+    except ImportError:
+        pass
+    except Exception as e:
+        err(f"{p}: frontmatter is not valid YAML: {e}")
     if fm.get("name") != s:
         err(f"{p}: name {fm.get('name')!r} != folder {s!r}")
     desc = fm.get("description", "")
@@ -49,8 +60,9 @@ for s in skills:
         err(f"{p}: description must say when to use it ('Use when ...')")
     if len(desc) > 1024:
         err(f"{p}: description longer than 1024 characters")
-    if len(lines) > 200:
-        err(f"{p}: {len(lines)} lines, budget is 200. Move detail to references/")
+    line_cap = {"cluster-ops": 200}.get(s, 150)
+    if len(lines) > line_cap:
+        err(f"{p}: {len(lines)} lines, budget is {line_cap}. Move detail to references/")
     n, cap = len(text.split()), words.get(p)
     if cap is None:
         err(f"{p}: no word budget, add it to scripts/word-budget.json")
