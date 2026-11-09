@@ -1,15 +1,14 @@
 # Genomics batch work: a short summary
 
-A short summary of practical rules for genomics batch work, not an expert guide. Check tool flags against each tool's own
-documentation.
+Practical rules, not an expert guide. Check each tool's flags against its own documentation.
 
 ## Shape of the jobs
 
 - **One independent unit, one array task.** Samples, chromosomes, intervals, linkage groups, parameter values and
   seeded replicates go in an array (`-J 'align[1-500]%50'`, line N of a manifest is task N), not in a `&`/`wait`
   loop inside one big job. A failure then costs one unit, and only failed indices are rerun.
-- Put the longest unit first in the manifest and check it against the queue's run limit. Units under a minute
-  each are batched several per task.
+- Put the longest unit first in the manifest and check it against the queue's run limit. Batch units under a
+  minute several to a task.
 - If a workflow engine must run inside one allocation, set its failure policy so independent units continue after
   one fails, and make the final status list every failed unit.
 - **Threads flag equals cores**: `bwa mem -t N`, `minimap2 -t N`, `samtools sort -@ (N-1)`, `pigz -p N`.

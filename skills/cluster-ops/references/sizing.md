@@ -10,17 +10,17 @@
 | `IDLE` | LSF idle factor < 0.25 | the job waited on something. Find out what |
 | `FAILED` | non-zero exit | read the log before sizing from it |
 
-To audit a project, run `jobeff --lsf-log` over every existing log first. Sum core-hours allocated, used, and
+To audit a project, first run `jobeff --lsf-log` over every existing log. Sum core-hours allocated, used and
 spent in failed or killed jobs, then fix the steps that lose the most.
 
 ## Raw sources
 
 - LSF running or recent: `bjobs -a -o 'jobid stat slots cpu_used run_time max_mem memlimit idle_factor exit_code'
   -json <id>`. An empty `MEMLIMIT` means the queue default applied. `bjobs -a` keeps finished jobs only for the
-  site's clean period, often an hour. After that, `bacct -l <id>` (run time = TURNAROUND - WAIT), given job ids,
-  not a wide time range.
-- Every LSF `.out` file ends with a "Resource usage summary", and cores come from "executed on host(s)
-  <8*node>" (no `N*` means 1). It is often the most reliable source months later.
+  site's clean period, often an hour. After that, use `bacct -l <id>` with job ids, not a wide time range (run
+  time = TURNAROUND - WAIT).
+- Every LSF `.out` file ends with a "Resource usage summary", often the most reliable source months later. Cores
+  come from `executed on host(s) <8*node>` (no `N*` means 1).
 - SLURM: `sacct -j <id> -P -o JobID,State,Elapsed,TotalCPU,AllocCPUS,ReqMem,MaxRSS` or `seff <id>`. `MaxRSS` is
   per step, so take the maximum over steps.
 
@@ -54,19 +54,19 @@ PEND time cannot be predicted from the request: cluster-wide load drives the lon
 jobs found no model that caught any GPU-queue wait over 1 h. The request still changes the risk:
 
 - GPU memory above the smallest large-GPU class (gmem over 32G there) added 28 points to the chance of waiting
-  over 1 h. Ways to fit under it: a smaller batch or half precision.
+  over 1 h. A smaller batch or half precision can fit a job under it.
 - Cutting cores had no average effect. It helps only when the pending reason says the fitting hosts lack cores.
 - Model or host pins shrink the eligible hosts. Drop a pin the job does not need.
 
 Submit through `scripts/pendlog submit --out DIR -- bsub ...` (when to run `pendlog started`: `monitoring.md`).
-Before a batch, `scripts/pend-risk --history jobs.csv --request "<bsub args>"` on
-`pendlog export` output or an accounting CSV prints how often similar recent jobs waited over 1 h, never an ETA.
+Before a batch, `scripts/pend-risk --history jobs.csv --request "<bsub args>"` prints how often similar recent
+jobs waited over 1 h, never an ETA. The history is `pendlog export` output or an accounting CSV.
 
 ## Ledger
 
-Keep one in the project. One row per verified run (exit 0, outputs checked), with the peak the scheduler
-measured. Note when a job hit its limit (the true peak is then unknown). A new tool version or input type gets a
-new row, not an edit.
+Keep one per project: one row per verified run (exit 0, outputs checked), with the peak the scheduler measured.
+Note when a job hit its limit, since the true peak is then unknown. A new tool version or input type gets a new
+row, not an edit.
 
 | Date | Task | Input size | Queue | Cores | -M (MB) | GPU | Wall | CPU eff | Peak mem | Throughput | Source |
 |---|---|---|---|---|---|---|---|---|---|---|---|

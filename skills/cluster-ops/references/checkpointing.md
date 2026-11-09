@@ -23,18 +23,18 @@ trap 'publish "$WORK/last.ckpt" "$OUT/last.ckpt"; exit 140' USR2
 
 ## Background helpers
 
-A loop that copies logs or checkpoints in the background has its pid recorded and killed in the EXIT trap.
-Otherwise it keeps the job alive after the work ends and can overwrite the final status. Under `set -e` with an
-ERR trap a helper dies at its first failing command without a message, so run it in a subshell with errexit and
-nounset off (`( set +eEu; trap - ERR; ... ) &`, see the job template). Alert when the checkpoint it publishes is
-older than two intervals, and restart it while the run continues. Never kill the run because a helper died
-unless its progress is confirmed saved.
+Record the pid of any background loop that copies logs or checkpoints, and kill it in the EXIT trap. Otherwise
+it keeps the job alive after the work ends and can overwrite the final status. Under `set -e` with an ERR trap, a
+helper dies at its first failing command without a message, so run it in a subshell with errexit and nounset off
+(`( set +eEu; trap - ERR; ... ) &`, as in the job template). Alert when the checkpoint it publishes is older than
+two intervals, and restart it while the run continues. Never kill the run because a helper died unless its
+progress is confirmed saved.
 
 ## Walltime fitted to the measured rate
 
 Measure the rate after warm-up (the second epoch, or steps 100 to 300) and write the ETA to `status.json`. If the
 ETA is above 1.2 x the time left, publish `last` and exit with a clear message ("rate too slow on this hardware")
-instead of being killed at 8 % done. Before relaxing a request so the job can land on slower hardware, time one
+rather than be killed at 8 % done. Before relaxing a request so the job can land on slower hardware, time one
 unit there and check the whole run fits.
 
 ## Child processes

@@ -18,7 +18,7 @@ and `lfs quota` reads that accounting directly without walking anything.
 - Count files with `lfs find DIR -type f | wc -l`.
 - `scripts/analyse_listing.py` answers top directories by count and bytes, age, extensions and duplicates from
   one listing.
-- Run one scan at a time, also across parallel agents or subagents. Prefer your centre's own Lustre guidance.
+- Run one scan at a time, counting parallel agents and subagents. Prefer your centre's own Lustre guidance.
 
 ## Local disk
 
@@ -35,8 +35,8 @@ Check known caches first (`~/.cache/pip`, `~/.cache/uv`, conda pkgs, `~/.cache/h
 
 ## Cleanup and prevention
 
-- The cleanup plan table (SKILL.md, Storage and cleanup) also gets a confidence column. Before removing a packed tree, check that the entry count from
-  `tar -tf` equals the file count.
+- The cleanup plan table (SKILL.md, Storage and cleanup) also gets a confidence column. Before removing a packed
+  tree, check that the entry count from `tar -tf` equals the file count.
 - Every input a model or pipeline needs exists on the cluster's shared storage, not only on a workstation.
 - `quota_report.sh <mount> <group> --gate` exits non-zero above 95 % of a limit or below 10,000 files of headroom
   (both adjustable), so a submit script can stop on it.

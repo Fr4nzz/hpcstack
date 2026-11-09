@@ -7,7 +7,7 @@
 | cores | `-n 8 -R "span[hosts=1]"` | `--cpus-per-task=8 --nodes=1` |
 | memory | `-M 8000 -R "select[mem>=8000] rusage[mem=8000]"` (per job) | `--mem=8G` (per node) or `--mem-per-cpu` |
 | walltime | `-W 4:00` | `--time=04:00:00` |
-| queue | `-q normal` | `--partition=<p>` (and sometimes `--qos`) |
+| queue | `-q normal` | `--partition=<partition>` (and sometimes `--qos`) |
 | GPU | `-gpu "num=1"` | `--gres=gpu:1` or `--gpus=1` |
 | array with cap | `-J 'x[1-500]%50'`, `$LSB_JOBINDEX` | `--array=1-500%50`, `$SLURM_ARRAY_TASK_ID` |
 | logs | `-o logs/%J.%I.out` | `--output=logs/%A_%a.out` |
@@ -22,7 +22,7 @@
 | usage of running job | `bjobs -o 'cpu_used run_time max_mem'` | `sstat -j <id> --format=AveCPU,MaxRSS` |
 | extend walltime | `bmod -W` (if the site allows) | `scontrol update JobId=<id> TimeLimit=...` (users can usually only lower it) |
 | kill | `bkill <id>` | `scancel <id>` |
-| queue info | `bqueues -l <q>` | `scontrol show partition <p>`, `sinfo -p <p>` |
+| queue info | `bqueues -l <queue>` | `scontrol show partition <partition>`, `sinfo -p <partition>` |
 
 Differences that bite:
 
@@ -30,5 +30,5 @@ Differences that bite:
   `LSB_JOB_MEMLIMIT` / `perJobMemLimit` in your site profile).
 - SLURM users usually cannot raise `TimeLimit` on a running job. Pick a modest `--time` for interactive work
   and rely on the `scripts/hpc-session-slurm` watchdog.
-- `seff` reports CPU efficiency and memory efficiency directly. MaxRSS is per step, so take the max over steps.
-- SLURM's `afterany` is LSF's `ended()`: it fires on failure too. Use `afterok`.
+- `seff` reports CPU and memory efficiency directly. `MaxRSS` is per step, so take the maximum over steps.
+- SLURM's `afterany` is LSF's `ended()` and fires on failure too. LSF's `done()` is `afterok`.
