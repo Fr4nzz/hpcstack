@@ -63,3 +63,13 @@ def test_code_is_ignored(tmp_path):
 def test_stray_backtick_hides_nothing_past_its_paragraph(tmp_path):
     errors = lint_errors(tmp_path, "# Case\n\nA stray ` backtick.\n\nThen <s> here, and a closing ` later.\n")
     assert len(errors) == 1 and errors[0].startswith("ERROR: case.md:5:"), errors
+
+
+def test_escaped_backticks_open_no_code(tmp_path):
+    errors = lint_errors(tmp_path, "# Case\n\nLiteral \\` then <s> then \\`.\n")
+    assert len(errors) == 1 and errors[0].startswith("ERROR: case.md:3:"), errors
+
+
+def test_backtick_in_fence_info_is_no_fence(tmp_path):
+    errors = lint_errors(tmp_path, "# Case\n\n```bad`info\n\n<s> here\n")
+    assert len(errors) == 1 and errors[0].startswith("ERROR: case.md:5:"), errors

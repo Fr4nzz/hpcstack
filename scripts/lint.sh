@@ -99,7 +99,9 @@ if not any(pl.get("name") == plugin.get("name") for pl in market.get("plugins", 
 def mask_code(text):
     """Blank out fenced blocks (``` or ~~~, closed by the same character at least as long), indented code
     blocks outside lists, and code spans within one paragraph. Line breaks stay, so line numbers hold.
-    Indented code inside a list item is not recognised and is checked as prose."""
+    Not recognised, so checked as prose: indented code inside a list item or straight after a heading, and fences
+    indented 4 or more spaces. A backtick after an escaped backslash (\\\\`) is taken as escaped. All of these only
+    give false alarms, except the last."""
     out, fence, in_list, prev_blank, prev_code = [], None, False, True, False
     for line in text.split("\n"):
         if fence:
@@ -107,7 +109,7 @@ def mask_code(text):
             if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
                 fence = None
             out.append(""); continue
-        m = re.match(r" {0,3}(`{3,}|~{3,})", line)
+        m = re.match(r" {0,3}(`{3,}(?=[^`]*$)|~{3,})", line)   # a backtick fence's info string has no backtick
         if m:
             fence = m.group(1); out.append(""); prev_blank = prev_code = False; continue
         blank = not line.strip()
@@ -119,7 +121,7 @@ def mask_code(text):
         out.append("" if code else line)
         prev_blank, prev_code = blank, code or (prev_code and blank)
     masked = "\n".join(out)
-    span = r"(`+)((?:(?!\1)[^\n]|\n(?![ \t]*\n))+?)(?<!`)\1(?!`)"
+    span = r"(?<![\\`])(`+)((?:(?!\1)[^\n]|\n(?![ \t]*\n))+?)(?<!`)\1(?!`)"   # \` opens nothing
     return re.sub(span, lambda m: "\n" * m.group(0).count("\n"), masked)
 
 for f in files:
