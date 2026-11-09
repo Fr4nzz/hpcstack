@@ -1,5 +1,4 @@
-"""Tests for skills/cluster-ops/scripts/hpc-probe with fake bsub, srun, bjobs, bkill, squeue and scancel on a private
-tmux socket. The tmux server is started first with other settings (another HPC_PROBE_DIR, a bare PATH), as a
+"""Tests for skills/cluster-ops/scripts/hpc-probe with fake bsub, bjobs and bkill on a private tmux socket. The tmux server is started first with other settings (another HPC_PROBE_DIR, a bare PATH), as a
 long-lived server would be, and a bystander session stays open the whole time and must never receive input.
 Skipped without tmux."""
 import json
@@ -16,34 +15,30 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PROBE = ROOT / "skills/cluster-ops/scripts/hpc-probe"
 WRAP = str((ROOT / "skills/cluster-ops/scripts/hpc-session").resolve())
-WRAP_SLURM = str((ROOT / "skills/cluster-ops/scripts/hpc-session-slurm").resolve())
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 
 # Fake scheduler. Jobs live in $FAKE_DIR/job.<id> as "id name user state". With FAKE_GATE set, a job pends until
 # the test creates $FAKE_DIR/release, so "typed while pending" is really typed while pending. The fake starts a
 # shell only when its last argument is the trusted wrapper, the way the real command would be that wrapper.
 FAKE_ALLOC = r"""#!/usr/bin/env bash
-dir=$FAKE_DIR; mode=${FAKE_MODE:-ok}; me=$(basename "$0"); jname=; prev=
-for a in "$@"; do [[ $prev == -J ]] && jname=$a; [[ $a == --job-name=* ]] && jname=${a#--job-name=}; prev=$a; done
+dir=$FAKE_DIR; mode=${FAKE_MODE:-ok}; jname=; prev=
+for a in "$@"; do [[ $prev == -J ]] && jname=$a; prev=$a; done
 printf '%s\n' "$*" >> "$dir/alloc-args"
-want=$FAKE_WRAP_LSF; [[ $me == srun ]] && want=$FAKE_WRAP_SLURM
-[[ ${!#} == "$want" ]] || { echo "fake $me: the command is not the wrapper"; exit 98; }
-c=$(cat "$dir/count.$me" 2>/dev/null || echo 0); echo $((c + 1)) > "$dir/count.$me"
-if [[ $me == bsub ]]; then id=$((4242 + c)); var=LSB_JOBID; P=PEND; R=RUN; D=DONE; X=EXIT
-  echo "Job <$id> is submitted to queue <normal>."; echo "<<Waiting for dispatch ...>>"
-else id=$((777 + c)); var=SLURM_JOB_ID; P=PENDING; R=RUNNING; D=COMPLETED; X=FAILED
-  echo "srun: job $id queued and waiting for resources"; fi
+[[ ${!#} == "$FAKE_WRAP" ]] || { echo "fake bsub: the command is not the wrapper"; exit 98; }
+c=$(cat "$dir/count" 2>/dev/null || echo 0); echo $((c + 1)) > "$dir/count"
+id=$((4242 + c))
+echo "Job <$id> is submitted to queue <normal>."; echo "<<Waiting for dispatch ...>>"
 setst() { echo "$id $jname $USER $1" > "$dir/job.$id"; }
-setst $P
+setst PEND
 if [[ -n ${FAKE_GATE:-} ]]; then until [[ -e $dir/release ]]; do sleep 0.1; done; else sleep "${FAKE_PEND:-1}"; fi
-if [[ $mode == fail ]]; then echo "Request aborted by esub. Job not submitted."; setst $X; exit 255; fi
-[[ $me == bsub ]] && echo "<<Starting on fakenode>>" || echo "srun: job $id has been allocated resources"
-setst $R
+if [[ $mode == fail ]]; then echo "Request aborted by esub. Job not submitted."; setst EXIT; exit 255; fi
+echo "<<Starting on fakenode>>"
+setst RUN
 host=fakenode; [[ $mode == samehost ]] && host=$(hostname)
 printf 'hostname() { echo %s; }\nPS1="job$ "\n' "$host" > "$dir/rc.$id"
-env "$var=$id" bash --rcfile "$dir/rc.$id" -i
+env "LSB_JOBID=$id" bash --rcfile "$dir/rc.$id" -i
 s=$?
-[[ $mode == sticky ]] || setst $D
+[[ $mode == sticky ]] || setst DONE
 exit $s
 """
 FAKE_BJOBS = r"""#!/usr/bin/env bash
@@ -53,16 +48,10 @@ hit=$(cat "$FAKE_DIR"/job.* 2>/dev/null | awk -v n="$n" -v u="$u" '$2 == n && $3
 [[ -n ${FAKE_DECORATE:-} ]] && hit=${hit/ hpc-probe-/ *probe-}
 [[ -n $hit ]] && echo "$hit" || { echo "Job <$n> is not found" >&2; exit 255; }
 """
-FAKE_SQUEUE = r"""#!/usr/bin/env bash
-# squeue -h -u USER -n NAME -o "..."
-while (( $# )); do case $1 in -n) n=$2; shift ;; -u) u=$2; shift ;; esac; shift; done
-cat "$FAKE_DIR"/job.* 2>/dev/null | awk -v n="$n" -v u="$u" '$2 == n && $3 == u'
-exit 0
-"""
 FAKE_KILL = r"""#!/usr/bin/env bash
 echo "$(basename "$0") $*" >> "$FAKE_DIR/kills.log"
 f=$FAKE_DIR/job.$1
-if [[ -e $f ]]; then read -r id n u s < "$f"; [[ $0 == *bkill ]] && s=EXIT || s=CANCELLED; echo "$id $n $u $s" > "$f"; fi
+if [[ -e $f ]]; then read -r id n u s < "$f"; echo "$id $n $u EXIT" > "$f"; fi
 echo "Job <$1> is being terminated"
 """
 FAKE_TMUX_FAILING_NEW = r"""#!/usr/bin/env bash
@@ -78,15 +67,15 @@ exec tmux -L "$REAL_SOCK" "$@"
 def env(tmp_path):
     bin_ = tmp_path / "bin"
     bin_.mkdir()
-    for name, body in (("bsub", FAKE_ALLOC), ("srun", FAKE_ALLOC), ("bjobs", FAKE_BJOBS), ("squeue", FAKE_SQUEUE),
-                       ("bkill", FAKE_KILL), ("scancel", FAKE_KILL), ("tmux-failing-new", FAKE_TMUX_FAILING_NEW)):
+    for name, body in (("bsub", FAKE_ALLOC), ("bjobs", FAKE_BJOBS), ("bkill", FAKE_KILL),
+                       ("tmux-failing-new", FAKE_TMUX_FAILING_NEW)):
         (bin_ / name).write_text(body)
         (bin_ / name).chmod(0o755)
     sock = f"hpcprobe-{os.getpid()}-{tmp_path.name}"[:90]
     tm = ["tmux", "-L", sock]
     e = dict(os.environ, PATH=f"{bin_}:{os.environ['PATH']}", FAKE_DIR=str(tmp_path), HPC_PROBE_DIR=str(tmp_path / "st"),
              HPC_PROBE_TMUX=" ".join(tm), HPC_PROBE_POLL="0.2", HPC_PROBE_RESEND="1", HPC_PROBE_STOP_GRACE="3",
-             REAL_SOCK=sock, FAKE_WRAP_LSF=WRAP, FAKE_WRAP_SLURM=WRAP_SLURM)
+             REAL_SOCK=sock, FAKE_WRAP=WRAP)
     e.pop("TMUX", None)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -143,7 +132,6 @@ def wait_for(cond, timeout=20):
 
 
 LSF = ["--", "bsub", "-Is", "-q", "normal", "-W", "2:00"]
-SLURM = ["--", "srun", "--time=02:00:00", "--pty"]
 
 
 def test_refuses_bad_names_timeouts_and_allocations(env):
@@ -164,10 +152,7 @@ def test_refuses_bad_names_timeouts_and_allocations(env):
            ["bsub", "-Is", "-W", "2:00", "-J", "hpc-session-x"],                     # own job name
            ["bsub", "-Is", "-W", "2:00", "-Z", "x"],                                 # unknown option
            ["bsub", "-Is", "-W"],                                                    # option without its value
-           ["srun", "--time=02:00:00", "--pty", "bash", "-c", "exec bash -i", "--", WRAP_SLURM],
-           ["srun", "--time=02:00:00", "--pty", "--job-name=x"],
-           ["srun", "--time=02:00:00", "--pty", "--frobnicate", "x"],                # unknown long option, no =
-           ["srun", "--pty"],                                                        # no walltime
+           ["srun", "--time=02:00:00", "--pty"],                                     # not bsub
            ["sbatch", "--time=1:00:00"]]
     for argv in bad:
         r = probe(env, "start", "p1", "--", *argv)
@@ -180,7 +165,7 @@ def test_lsf_markers_commands_timeout_and_stop(env):
     r = probe(env, "start", "p1", "--", "bsub", "-Is", "-q", "normal", "-n", "2", "-M", "4000", "-R",
               "select[mem>=4000] rusage[mem=4000]", "-W", "2:00", "-wa", "USR2", "-wt", "10")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "job=4242 host=fakenode sched=lsf job_name=hpc-probe-p1-" in r.stdout
+    assert "job=4242 host=fakenode job_name=hpc-probe-p1-" in r.stdout
     args = (env["dir"] / "alloc-args").read_text().strip()
     assert args.startswith("-J hpc-probe-p1-") and args.endswith(f"-wt 10 {WRAP}")
     assert probe(env, "start", "p1", *LSF).returncode == 2                       # name in use
@@ -218,23 +203,12 @@ def test_shell_options_do_not_leak_between_runs(env):
     assert probe(env, "stop", "o1").returncode == 0
 
 
-def test_slurm_readiness_and_completed_is_ended(env):
-    r = probe(env, "start", "s1", *SLURM)
-    assert r.returncode == 0 and "job=777 host=fakenode sched=slurm" in r.stdout, r.stdout + r.stderr
-    args = (env["dir"] / "alloc-args").read_text().strip()
-    assert args.startswith("--job-name=hpc-probe-s1-") and args.endswith(f"--pty {WRAP_SLURM}")
-    assert probe(env, "run", "s1", "--", "echo $SLURM_JOB_ID").stdout.startswith("777")
-    r = probe(env, "stop", "s1")                     # squeue still lists the job as COMPLETED: that is ended
-    assert r.returncode == 0 and r.elapsed < 15, r.stdout
-    assert kills(env) == ""
-
-
-def test_held_slurm_job_is_live_and_cancelled(env):
-    assert probe(env, "start", "s2", *SLURM, FAKE_MODE="sticky").returncode == 0
-    (env["dir"] / "job.777").write_text(f"777 {state(env, 's2')['job_name']} {os.environ.get('USER', '')} SPECIAL_EXIT\n")
-    r = probe(env, "stop", "s2")
+def test_held_job_is_live_and_killed(env):
+    assert probe(env, "start", "h1", *LSF, FAKE_MODE="sticky").returncode == 0
+    (env["dir"] / "job.4242").write_text(f"4242 {state(env, 'h1')['job_name']} {os.environ.get('USER', '')} PSUSP\n")
+    r = probe(env, "stop", "h1")
     assert r.returncode == 0, r.stdout
-    assert kills(env) == "scancel 777\n"
+    assert kills(env) == "bkill 4242\n"
 
 
 def test_stop_keeps_everything_when_the_answer_is_unclear(env):

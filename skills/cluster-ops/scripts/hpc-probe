@@ -1,27 +1,25 @@
 #!/usr/bin/env python3
 """hpc-probe: drive an interactive allocation from an agent, one tool call per action.
 
-Tested on LSF (farm22) with a real bsub -Is, and with fake bsub, srun, bjobs, bkill, squeue and scancel in a
-private tmux socket (tests/test_hpc_probe.py). The SLURM path is UNTESTED on a real cluster.
+Tested on LSF (farm22) with a real bsub -Is, and with fake bsub, bjobs and bkill in a private tmux socket
+(tests/test_hpc_probe.py).
 
 Usage (on the login node, in the run folder):
   hpc-probe start NAME [--timeout S] -- bsub -Is -q QUEUE -W 2:00 [other bsub options]
-  hpc-probe start NAME [--timeout S] -- srun --pty --time=02:00:00 [other srun options]
   hpc-probe run   NAME [--timeout S] [--tail N] -- 'shell command'
   hpc-probe wait  NAME [--timeout S]
   hpc-probe stop  NAME
   hpc-probe attach NAME
 
-start   Give scheduler options only. hpc-probe appends the hpc-session (bsub) or hpc-session-slurm (srun) next to
-        this script as the command, and adds the job name hpc-probe-NAME-<random>. It refuses an empty, malformed
-        or used NAME, a missing -Is/--pty or walltime, -J/--job-name, any option it does not know (long srun
-        options may always be written --option=value), and any word that is not an option or an option's value,
-        so no other program can become the allocation's command. Creates the tmux session NAME whose own command
+start   Give bsub options only. hpc-probe appends the hpc-session next to this script as the command, and adds
+        the job name hpc-probe-NAME-<random>. It refuses an empty, malformed or used NAME, a missing -Is or
+        walltime, -J, any option it does not know, and any word that is not an option or an option's value, so
+        no other program can become the allocation's command. Creates the tmux session NAME whose own command
         is the allocation, with no login shell under it: keys sent while the job pends, after a rejection or
         after the end never reach a login-node shell. Records the session id, pane id and pane pid, and from then
         on talks only to that pane, after checking all three. The allocation gets the environment and folder of
         this call, minus secret-looking variables (names with a TOKEN, SECRET, PASSWORD, PASSWD, CREDENTIAL or
-        COOKIE part, or ending in _KEY, _PASS or _PWD; LSF_*, LSB_* and SLURM_* are always kept). start prints
+        COOKIE part, or ending in _KEY, _PASS or _PWD; LSF_* and LSB_* are always kept). start prints
         the names it left out. The saved environment file is mode 0600 and is deleted as soon as the launcher
         reads it. Re-sends a readiness echo until the job's shell answers with a numeric job id and a host other
         than this login node. Saves the state and prints it.
@@ -35,11 +33,10 @@ run     Refuses a probe that is not ready, a missing or replaced session and a p
         longer than 540 s belong in a batch job.
 wait    Keeps waiting after a start or run timeout, or after a tool call was cut off. Same exit codes.
 stop    Interrupts a running command and sends `exit`. Then it looks the job up by its job name and owner in
-        bjobs or squeue, from the same scheduler setup as start (LSF_ENVDIR, SLURM_CONF, SLURM_CLUSTERS). Only
-        DONE/EXIT (LSF) and COMPLETED, FAILED, CANCELLED, TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, BOOT_FAIL, DEADLINE,
-        PREEMPTED (SLURM), or no row at all, count as ended. Held and requeued states count as live. A live job
+        bjobs, from the same LSF setup as start (LSF_ENVDIR, LSF_SERVERDIR). Only DONE, EXIT or no row at all
+        count as ended. Pending and suspended states count as live. A live job
         with the recorded id is killed after 30 s, by that id. Any other answer (a row it cannot parse, an
-        unknown state, a different scheduler setup) keeps the pane and the state and exits 1. Once the job has
+        unknown state, a different LSF setup) keeps the pane and the state and exits 1. Once the job has
         ended it closes the tmux session (just the probe's pane if someone added panes).
 attach  Prints the read-only attach command for a person who wants to watch.
 
@@ -74,29 +71,16 @@ MAX_WAIT = 540
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 SECRET_PARTS = {"TOKEN", "TOKENS", "SECRET", "SECRETS", "PASSWORD", "PASSWD", "CREDENTIAL", "CREDENTIALS", "COOKIE",
                 "APIKEY"}
-WRAPPER = {"lsf": "hpc-session", "slurm": "hpc-session-slurm"}
-# Scheduler options hpc-probe accepts, by whether they take a value. Anything else is refused.
-OPTS = {
-    "lsf": {"value": {"-q", "-n", "-M", "-R", "-W", "-We", "-o", "-oo", "-e", "-eo", "-gpu", "-P", "-G", "-m", "-Jd",
-                      "-sp", "-wa", "-wt", "-cwd", "-env", "-app", "-U", "-u", "-w", "-E", "-Ep", "-c", "-L",
-                      "-outdir", "-g", "-sla", "-C", "-D", "-F", "-S", "-v", "-t", "-b", "-ptl", "-k", "-mig", "-Lp",
-                      "-data", "-ext"},
-            "flag": {"-Is", "-I", "-Ip", "-IS", "-ISs", "-ISp", "-IX", "-tty", "-H", "-B", "-N", "-x", "-r", "-rn",
-                     "-K", "-XF", "-hl"}},
-    "slurm": {"value": {"-p", "-t", "-c", "-n", "-N", "-G", "-A", "-q", "-w", "-x", "-C", "-D", "-o", "-e", "-i",
-                        "--time", "--partition", "--account", "--qos", "--mem", "--mem-per-cpu", "--cpus-per-task",
-                        "--ntasks", "--nodes", "--gres", "--gpus", "--constraint", "--chdir", "--reservation",
-                        "--nodelist", "--exclude", "--export"},
-              "flag": {"--pty", "--exclusive", "--x11", "--quiet", "--verbose", "--unbuffered", "--label",
-                       "--overcommit", "--no-kill", "-Q", "-v", "-u", "-l", "-O"}}}
-ENDED = {"lsf": {"DONE", "EXIT"},
-         "slurm": {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "BOOT_FAIL", "DEADLINE",
-                   "PREEMPTED"}}
-LIVE = {"lsf": {"PEND", "PSUSP", "RUN", "USUSP", "SSUSP", "WAIT", "PROV"},
-        "slurm": {"PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "SUSPENDED", "REQUEUED", "REQUEUE_HOLD",
-                  "REQUEUE_FED", "SPECIAL_EXIT", "RESIZING", "STOPPED", "SIGNALING", "STAGE_OUT", "RESV_DEL_HOLD",
-                  "POWER_UP_NODE", "UPDATE_DB"}}
-CONTEXT_VARS = ("LSF_ENVDIR", "LSF_SERVERDIR", "SLURM_CONF", "SLURM_CLUSTERS")
+WRAPPER = "hpc-session"
+# bsub options hpc-probe accepts, by whether they take a value. Anything else is refused.
+VALUE_OPTS = {"-q", "-n", "-M", "-R", "-W", "-We", "-o", "-oo", "-e", "-eo", "-gpu", "-P", "-G", "-m", "-Jd", "-sp",
+              "-wa", "-wt", "-cwd", "-env", "-app", "-U", "-u", "-w", "-E", "-Ep", "-c", "-L", "-outdir", "-g", "-sla",
+              "-C", "-D", "-F", "-S", "-v", "-t", "-b", "-ptl", "-k", "-mig", "-Lp", "-data", "-ext"}
+FLAG_OPTS = {"-Is", "-I", "-Ip", "-IS", "-ISs", "-ISp", "-IX", "-tty", "-H", "-B", "-N", "-x", "-r", "-rn", "-K", "-XF",
+             "-hl"}
+ENDED = {"DONE", "EXIT"}
+LIVE = {"PEND", "PSUSP", "RUN", "USUSP", "SSUSP", "WAIT", "PROV"}
+CONTEXT_VARS = ("LSF_ENVDIR", "LSF_SERVERDIR")
 STATE_DIR = os.path.abspath(os.path.expanduser(os.environ.get("HPC_PROBE_DIR", "~/.hpc-probe")))
 TMUX = shlex.split(os.environ.get("HPC_PROBE_TMUX", "tmux"))
 POLL = float(os.environ.get("HPC_PROBE_POLL", "2"))
@@ -108,7 +92,7 @@ SECURE = os.O_NOFOLLOW | os.O_CLOEXEC
 
 def secret_name(k):
     u = k.upper()
-    if u in ("PWD", "OLDPWD") or u.startswith(("LSF_", "LSB_", "SLURM_")):
+    if u in ("PWD", "OLDPWD") or u.startswith(("LSF_", "LSB_")):
         return False
     return bool(SECRET_PARTS & set(u.split("_"))) or u.endswith(("_KEY", "_PASS", "_PWD"))
 
@@ -297,44 +281,35 @@ def gone(st, why):
 
 # ---------------------------------------------------------------- start
 def allocation(argv):
-    """(scheduler, error). argv is the scheduler and its options only: every word must be a known option or the
-    value of one, so no other program can become the allocation's command."""
+    """The error, or None. argv is bsub and its options only: every word must be a known option or the value of
+    one, so no other program can become the allocation's command."""
     if not argv:
-        return None, "give the scheduler and its options after --, e.g. -- bsub -Is -q normal -W 2:00"
-    sched = {"bsub": "lsf", "srun": "slurm"}.get(os.path.basename(argv[0]))
-    if not sched:
-        return None, "the allocation must be bsub or srun (options only: hpc-probe adds the hpc-session command)"
+        return "give bsub and its options after --, e.g. -- bsub -Is -q normal -W 2:00"
+    if os.path.basename(argv[0]) != "bsub":
+        return "the allocation must be bsub (options only: hpc-probe adds the hpc-session command)"
     seen, i, args = set(), 1, argv[1:]
-    opts = OPTS[sched]
     while i <= len(args):
         a = args[i - 1]
-        if sched == "slurm" and a.startswith("--") and "=" in a:
-            seen.add(a.split("=", 1)[0])
-        elif a in opts["flag"]:
+        if a in FLAG_OPTS:
             seen.add(a)
-        elif a in opts["value"]:
+        elif a in VALUE_OPTS:
             if i == len(args) or args[i].startswith("-") and not re.fullmatch(r"-\d.*", args[i]):
-                return None, f"{a} needs a value"
+                return f"{a} needs a value"
             seen.add(a)
             i += 1
-        elif a in ("-J", "--job-name") or a.startswith("--job-name="):
-            return None, "do not pass a job name: hpc-probe sets it to hpc-probe-NAME-<random>"
+        elif a == "-J":
+            return "do not pass a job name: hpc-probe sets it to hpc-probe-NAME-<random>"
         elif a.startswith("-"):
-            hint = " Write long options as --option=value." if sched == "slurm" else ""
-            return None, f"unknown option {a!r}: hpc-probe accepts only options whose values it can tell apart.{hint}"
+            return f"unknown option {a!r}: hpc-probe accepts only options whose values it can tell apart"
         else:
-            return None, (f"{a!r} is not an option or an option's value. Give scheduler options only: hpc-probe adds "
-                          f"the {WRAPPER[sched]} command itself")
+            return (f"{a!r} is not an option or an option's value. Give bsub options only: hpc-probe adds the "
+                    f"{WRAPPER} command itself")
         i += 1
-    if "--job-name" in seen:
-        return None, "do not pass a job name: hpc-probe sets it to hpc-probe-NAME-<random>"
-    if sched == "lsf" and "-Is" not in seen:
-        return None, "bsub needs -Is for an interactive shell"
-    if sched == "slurm" and "--pty" not in seen:
-        return None, "srun needs --pty for an interactive shell"
-    if not seen & {"-W", "-t", "--time"}:
-        return None, "set a short walltime (-W for bsub, --time for srun)"
-    return sched, None
+    if "-Is" not in seen:
+        return "bsub needs -Is for an interactive shell"
+    if not seen & {"-W", "-t"}:
+        return "set a short walltime (-W)"
+    return None
 
 
 def cmd_start(name, timeout, argv):
@@ -343,20 +318,19 @@ def cmd_start(name, timeout, argv):
     old = load(name)
     if has_session(name) or (old and old.get("status") != "stopped"):
         done(REFUSED, f"name {name} is in use. Pick a new name")
-    sched, err = allocation(argv)
+    err = allocation(argv)
     if err:
         done(REFUSED, err)
     path = shutil.which(argv[0])
     if not path:
         done(REFUSED, f"{argv[0]} not found on PATH")
-    wrapper = os.path.join(os.path.dirname(os.path.realpath(__file__)), WRAPPER[sched])
+    wrapper = os.path.join(os.path.dirname(os.path.realpath(__file__)), WRAPPER)
     if not (os.path.isfile(wrapper) and os.access(wrapper, os.X_OK)):
         done(REFUSED, f"{wrapper} is missing or not executable")
     token = secrets.token_hex(4)
     job_name = f"hpc-probe-{name}-{token}"
-    name_opt = ["-J", job_name] if sched == "lsf" else [f"--job-name={job_name}"]
     cwd = os.getcwd()
-    st = {"name": name, "token": token, "sched": sched, "argv": [path] + name_opt + argv[1:] + [wrapper],
+    st = {"name": name, "token": token, "argv": [path, "-J", job_name] + argv[1:] + [wrapper],
           "cwd": cwd, "job_name": job_name, "owner": owner(),
           "context": {k: os.environ.get(k) for k in CONTEXT_VARS},
           "log_dir": os.path.join(STATE_DIR, "runs", f"{name}-{token}"), "login_host": socket.gethostname(),
@@ -418,7 +392,7 @@ def cmd_launch(path):
 def wait_ready(st, timeout):
     name = st["name"]
     ready_re = re.escape(marker(st, "READY_")) + r"(\d+)_(\S+)"
-    probe = f'echo "{marker(st, "READY_")}${{LSB_JOBID:-${{SLURM_JOB_ID:-none}}}}_$(hostname)"'
+    probe = f'echo "{marker(st, "READY_")}${{LSB_JOBID:-none}}_$(hostname)"'
     t_end, next_send, gap = time.time() + timeout, 0.0, RESEND
     while True:
         lines = pane(st)
@@ -434,7 +408,7 @@ def wait_ready(st, timeout):
                               f"Run `hpc-probe stop {name}`")
             st.update(status="ready", job_id=job, host=host)
             save(st)
-            print(f"name={name} job={job} host={host} sched={st['sched']} job_name={st['job_name']} "
+            print(f"name={name} job={job} host={host} job_name={st['job_name']} "
                   f"log_dir={st['log_dir']}")
             done(OK, f"{name}: ready. Send commands with `hpc-probe run {name} -- '<cmd>'`")
         if ended is not None:
@@ -539,35 +513,31 @@ def cmd_wait(name, timeout, tail):
 def job_lookup(st):
     """('gone' | 'running' | 'unknown', job id), by the probe's job name and owner. 'gone' only for an explicit
     ended state or no row at all. A row that does not parse or match, an unknown state, several rows or another
-    scheduler setup than start's give 'unknown'."""
-    sched, want = st["sched"], st.get("job_id")
+    LSF setup than start's give 'unknown'."""
+    want = st.get("job_id")
     now = {k: os.environ.get(k) for k in CONTEXT_VARS}
     if st.get("context") is not None and now != st["context"]:
-        print(f"hpc-probe: scheduler setup differs from start ({st['context']} then, {now} now)")
+        print(f"hpc-probe: LSF setup differs from start ({st['context']} then, {now} now)")
         return "unknown", None
-    if sched == "lsf":
-        cmd = ["bjobs", "-a", "-u", st["owner"], "-J", st["job_name"], "-noheader", "-o", "jobid job_name user stat"]
-    else:
-        cmd = ["squeue", "-h", "-u", st["owner"], "-n", st["job_name"], "-o", "%i %j %u %T"]
+    cmd = ["bjobs", "-a", "-u", st["owner"], "-J", st["job_name"], "-noheader", "-o", "jobid job_name user stat"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired):
         return "unknown", None
     lines = [x for x in r.stdout.splitlines() if x.strip()]
     if not lines:
-        err = r.stderr
-        if sched == "lsf" and r.returncode and re.search(r"is not found|No (unfinished |matching )?job found", err):
+        if r.returncode and re.search(r"is not found|No (unfinished |matching )?job found", r.stderr):
             return "gone", None
-        return ("gone", None) if sched == "slurm" and r.returncode == 0 else ("unknown", None)
+        return "unknown", None
     if r.returncode or len(lines) != 1:
         return "unknown", None
     f = lines[0].split()
     if len(f) != 4 or not f[0].isdigit() or f[1] != st["job_name"] or f[2] != st["owner"] or (want and f[0] != want):
         print(f"hpc-probe: cannot read the scheduler's row as this probe's job: {lines[0]!r}")
         return "unknown", None
-    if f[3] in ENDED[sched]:
+    if f[3] in ENDED:
         return "gone", f[0]
-    if f[3] in LIVE[sched]:
+    if f[3] in LIVE:
         return "running", f[0]
     print(f"hpc-probe: unknown job state {f[3]!r}")
     return "unknown", f[0]
@@ -597,7 +567,7 @@ def cmd_stop(name):
     if state == "running":
         state, jid = job_lookup(st)   # re-query right before the kill: name, owner and id must still match
         if state == "running" and jid:
-            kill = ["bkill", jid] if st["sched"] == "lsf" else ["scancel", jid]
+            kill = ["bkill", jid]
             r = subprocess.run(kill, capture_output=True, text=True)
             print(f"{' '.join(kill)}: {(r.stdout + r.stderr).strip()}")
             t_end = time.time() + 120

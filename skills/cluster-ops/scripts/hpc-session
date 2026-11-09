@@ -3,29 +3,28 @@
 #
 # Tested on LSF (October-November 2026): survives while the job uses CPU or the user types, releases the job
 # after the idle limit on a CPU queue and on a GPU queue, and keeps a GPU-bound job with near-zero CPU alive
-# (also through 20 s GPU pauses). Not yet tested on SLURM.
+# (also through 20 s GPU pauses).
 #
-# Run it as the command of an interactive allocation, inside tmux on the login node:
-#   LSF:   bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00 -wa USR2 -wt 10 \
-#               /path/to/hpc-session
-#   SLURM: srun --cpus-per-task=2 --mem=4G --time=02:00:00 --pty /path/to/hpc-session-slurm
+# Run it as the command of an interactive LSF job, inside tmux on the login node:
+#   bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00 -wa USR2 -wt 10 \
+#        /path/to/hpc-session
 #
 # What it does:
 #   - writes $HPC_SESSION_DIR/<jobid>.json (job, host, start, idle limit) and logs to <jobid>.log
 #   - starts a watchdog in its own session, then an interactive bash whose PROMPT_COMMAND touches a
 #     heartbeat file. Every command typed (or sent with tmux send-keys) refreshes the heartbeat.
-#   - every HPC_CHECK_S seconds the watchdog releases the job (bkill / scancel) only when ALL hold:
+#   - every HPC_CHECK_S seconds the watchdog releases the job (bkill) only when ALL hold:
 #       heartbeat older than HPC_IDLE_MIN minutes
 #       job CPU over the last HPC_CPU_WINDOW_S seconds below HPC_CPU_IDLE_CORES cores
 #       every visible GPU below HPC_GPU_IDLE_PCT % utilisation (no nvidia-smi = no GPU check)
-#   - if job CPU cannot be measured (no cgroup counter and no bjobs/sstat), it never kills on CPU grounds
-#     and logs a warning. The short walltime (-W / --time) is then the only backstop.
+#   - if job CPU cannot be measured (no cgroup counter and no bjobs), it never kills on CPU grounds
+#     and logs a warning. The short walltime (-W) is then the only backstop.
 #
 # Settings (environment variables):
 #   HPC_IDLE_MIN=30  HPC_CHECK_S=60  HPC_CPU_WINDOW_S=300  HPC_CPU_IDLE_CORES=0.1  HPC_GPU_IDLE_PCT=5
 #   HPC_IDLE_S (seconds, overrides HPC_IDLE_MIN)  HPC_SESSION_DIR=$HOME/.hpc-session
-#   HPC_DRY_RUN=1 (log the decision, never kill)  HPC_CPU_SOURCE=auto|sched (sched: skip the cgroup lookup)
-#   HPC_SCHED=lsf|slurm (default: detected from LSB_JOBID / SLURM_JOB_ID)
+#   HPC_DRY_RUN=1 (log the decision, never kill)
+#   HPC_CPU_SOURCE=auto|sched (sched: skip the cgroup lookup and read bjobs)
 set -u
 
 SELF=$(readlink -f "${BASH_SOURCE[0]}")
@@ -39,14 +38,9 @@ DIR=${HPC_SESSION_DIR:-$HOME/.hpc-session}
 DRY_RUN=${HPC_DRY_RUN:-0}
 IDLE_S=${HPC_IDLE_S:-$(( IDLE_MIN * 60 ))}   # seconds; overrides HPC_IDLE_MIN (useful for tests)
 
-if [[ -z ${HPC_SCHED:-} ]]; then
-  if [[ -n ${LSB_JOBID:-} ]]; then HPC_SCHED=lsf; elif [[ -n ${SLURM_JOB_ID:-} ]]; then HPC_SCHED=slurm; fi
-fi
-case ${HPC_SCHED:-} in
-  lsf)   JOB=${LSB_JOBID:?LSB_JOBID not set}; JOB_PATTERN="job.${JOB}." ;;
-  slurm) JOB=${SLURM_JOB_ID:?SLURM_JOB_ID not set}; JOB_PATTERN="job_${JOB}" ;;
-  *) echo "hpc-session: run me as the command of an interactive job (bsub -Is or srun --pty)" >&2; exit 2 ;;
-esac
+JOB=${LSB_JOBID:-}
+[[ -n $JOB ]] || { echo "hpc-session: run me as the command of an interactive job (bsub -Is)" >&2; exit 2; }
+JOB_PATTERN="job.${JOB}."
 
 LOG=$DIR/$JOB.log
 HB=$DIR/$JOB.hb
@@ -91,17 +85,7 @@ cpu_seconds() {
     v2:*) awk '$1=="usage_usec"{printf "%.3f\n", $2/1e6}' "${src#v2:}" 2>/dev/null ;;
     v1:*) awk '{printf "%.3f\n", $1/1e9}' "${src#v1:}" 2>/dev/null ;;
     sched)
-      if [[ $HPC_SCHED == lsf ]]; then
-        v=$(bjobs -noheader -o cpu_used "$JOB" 2>/dev/null | awk '{print $1}')
-      else  # sum TotalCPU over running steps; format [D-][HH:]MM:SS[.ms]
-        v=$(sstat -a -n -P -j "$JOB" --format=TotalCPU 2>/dev/null | awk '
-          NF { t = $0; d = 0
-               if (index(t, "-")) { split(t, a, "-"); d = a[1]; t = a[2] }
-               n = split(t, p, ":"); s = 0
-               for (i = 1; i <= n; i++) s = s * 60 + p[i]
-               tot += d * 86400 + s; seen = 1 }
-          END { if (seen) printf "%.3f\n", tot }')
-      fi
+      v=$(bjobs -noheader -o cpu_used "$JOB" 2>/dev/null | awk '{print $1}')
       [[ $v =~ ^[0-9.]+$ ]] && echo "$v" ;;
   esac
 }
@@ -121,10 +105,6 @@ gpu_max_util() {
     $3 ~ /^[0-9]+$/ { u = $3 + 0; if (!seen || u > all) all = u; seen = 1
                       if (($1 in want) || ($2 in want)) { if (!hit || u > mine) mine = u; hit = 1 } }
     END { if (!seen) print "err"; else if (hit) print mine; else print all }' <<< "$out"
-}
-
-kill_job() {
-  if [[ $HPC_SCHED == lsf ]]; then bkill "$JOB"; else scancel "$JOB"; fi
 }
 
 # ---- watchdog ----------------------------------------------------------------------------------
@@ -182,7 +162,7 @@ watchdog() {
       log "idle: heartbeat ${age}s old, cpu ${cores:-?} cores over ${CPU_WINDOW_S}s, gpu ${gpu:-none}${gpu:+%} since ${gpu_idle_since:+$(( now - gpu_idle_since ))s}. Releasing job $JOB"
       if [[ $DRY_RUN == 1 ]]; then log "dry run: not killing"; continue; fi
       rm -f "$DIR/$JOB.rc" "$HB"   # the shell is killed with the job and cannot clean up
-      kill_job >> "$LOG" 2>&1
+      bkill "$JOB" >> "$LOG" 2>&1
       exit 0
     fi
   done
@@ -197,7 +177,7 @@ fi
 mkdir -p "$DIR"
 touch "$HB"
 cat > "$DIR/$JOB.json" <<EOF
-{"job": "$JOB", "scheduler": "$HPC_SCHED", "host": "$(hostname)", "start": "$(date -Is)", "idle_min": $IDLE_MIN, "log": "$LOG"}
+{"job": "$JOB", "host": "$(hostname)", "start": "$(date -Is)", "idle_min": $IDLE_MIN, "log": "$LOG"}
 EOF
 cat > "$DIR/$JOB.rc" <<EOF
 [ -f ~/.bashrc ] && source ~/.bashrc
