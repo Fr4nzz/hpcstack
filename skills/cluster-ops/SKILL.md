@@ -21,37 +21,36 @@ Everyone shares the login node. Run only light commands there: `bjobs`, `bqueues
 editing files, `bsub`. Scans (`du`, `find`, `ls -R`), compression, `pip install`, builds and anything over a minute
 of CPU go in a job. Watchdogs run inside the allocation, never on the login node or from cron. Never
 `tmux kill-server` there: it ends every session you have, including other agents' live ones. Close stale tmux
-sessions one at a time, after checking that each is an idle shell.
+sessions one at a time, each checked to be an idle shell.
 
 ## Interactive or batch
 
 - Anything that runs longer than you are sure to be watching, or can be scripted, is a batch job or a worker-queue
   task (`cluster-autoresearch`). Batch jobs end on their own when the agent stops.
-- Interactive is for probes, first-run debugging and commands that have no script yet. It always runs under
-  `scripts/hpc-session` with a short walltime, driven by `scripts/hpc-probe`. An allocation without all three is a
-  bug.
+- Interactive is for probes, first-run debugging and commands that have no script yet. It always runs through
+  `scripts/hpc-probe`, which adds `scripts/hpc-session`, with a short walltime. Anything else is a bug.
 - Local GPU or cluster: for a GPU step over about 15 min, compare the recent PEND for the request plus cluster
   runtime and upload with the local GPU's measured time. Take the faster and say why.
 
 ```bash
-P=/path/to/cluster-ops/scripts/hpc-probe   # login node, run folder. SLURM: srun --time=... --pty instead
+P=/path/to/cluster-ops/scripts/hpc-probe   # login node, run folder. SLURM: srun --pty --time=... instead
 $P start probe-<task> -- bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00 \
-   -wa USR2 -wt 10 /path/to/cluster-ops/scripts/hpc-session
+   -wa USR2 -wt 10                             # options only: hpc-probe adds the command
 $P run probe-<task> -- 'python check.py --quick'   # waits up to 540 s, returns the command's exit code
 $P stop probe-<task>
 ```
-
-- `start` refuses a used name and returns once a job id and a compute host answer. Every call checks that the
-  tmux pane is still the one `start` made. `run` exits with the command's code, 3 if the pane was replaced, 124 on
-  a timeout, 125 if the allocation is gone. Give the tool call 600 s or a smaller `--timeout`. After a
-  cut-off call, `$P wait`. Secret-looking variables do not reach the job. Details: `references/interactive.md`.
-- `-W 2:00` is the hard backstop. Many sites refuse to extend a running job, so choose it up front.
-- `hpc-session` releases the job once nobody types and the job's CPU and GPUs are idle. A training inside it keeps
-  the job alive.
+- `start` refuses a used name and returns once a job id and a compute host answer. Every call checks that the tmux
+  pane is the one `start` made. `run` exits with the command's code, 3 if the pane was replaced, 124 on a timeout,
+  125 if the allocation is gone. Give the tool call 600 s or a smaller `--timeout`, and `$P wait` after a cut-off
+  call. Secret-looking variables stay out of the job. Commands are kept: read tokens from a file. Details:
+  `references/interactive.md`.
+- `-W 2:00` is the backstop. Many sites refuse to extend a running job, so choose it up front.
+- `hpc-session` releases the job once nobody types and the job's CPU and GPUs are idle, so a training inside it
+  keeps the job alive.
 - Ask for what the probe needs (1 GPU, a few cores, measured memory). CPU-only work goes to a CPU queue. Record
-  the job id, probe name and purpose where the user can see them (`$P attach` prints a read-only watch command).
-- `stop` exits the shell, confirms by job name with `bjobs`/`squeue` that the job is gone (killing that exact id
-  if needed), and only then closes the pane. If the job stays listed, it keeps the session: monitor and report.
+  the job id, probe name and purpose where the user can see them (`$P attach` prints a read-only view).
+- `stop` exits the shell, confirms with `bjobs`/`squeue` that the job ended (killing that exact id if needed), and
+  only then closes the pane. An unclear answer keeps the pane (exit 1): monitor and report.
 
 ## Size the request
 
