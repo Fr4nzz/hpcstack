@@ -100,8 +100,8 @@ def mask_code(text):
     """Blank out fenced blocks (``` or ~~~, closed by the same character at least as long), indented code
     blocks outside lists, and code spans within one paragraph. Line breaks stay, so line numbers hold.
     Not recognised, so checked as prose: indented code inside a list item or straight after a heading, and fences
-    indented 4 or more spaces. A backtick after an escaped backslash (\\\\`) is taken as escaped. All of these only
-    give false alarms, except the last."""
+    indented 4 or more spaces. An escaped backslash followed by a backtick is taken as an escaped backtick. All of
+    these only give false alarms, except the last."""
     out, fence, in_list, prev_blank, prev_code = [], None, False, True, False
     for line in text.split("\n"):
         if fence:
