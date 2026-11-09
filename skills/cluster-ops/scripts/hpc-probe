@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+"""hpc-probe: drive an interactive allocation from an agent, one tool call per action.
+
+UNTESTED on a real cluster: tested only with fake bsub, srun, bjobs, bkill, squeue and scancel in a private tmux
+socket (tests/test_hpc_probe.py).
+
+Usage (on the login node, in the run folder):
+  hpc-probe start NAME [--timeout S] -- bsub -Is ... -W 2:00 ... /path/to/hpc-session
+  hpc-probe start NAME [--timeout S] -- srun ... --time=02:00:00 --pty /path/to/hpc-session-slurm
+  hpc-probe run   NAME [--timeout S] [--tail N] -- 'one shell command'
+  hpc-probe wait  NAME [--timeout S]
+  hpc-probe stop  NAME
+  hpc-probe attach NAME
+
+start   Refuses an empty, malformed or used NAME, and an allocation command without -Is (bsub) or --pty (srun),
+        without a walltime (-W, --time or -t) or without hpc-session as the shell. Creates the tmux session NAME
+        whose own command is the allocation (no login shell under it, so keys sent while the job pends, after a
+        rejection or after the end never reach a login-node shell). The allocation gets the environment and
+        folder of this call. Re-sends a readiness echo until the job's shell answers with a numeric job id and a
+        host other than this login node. Saves the state, prints it and exits 0.
+run     Refuses a probe that is not ready, a missing session and a probe whose previous command has not ended.
+        Sends the command with the next numbered marker, output to hpc-probe-logs/NAME/N.log and stdin from
+        /dev/null, waits for that marker, prints the log tail and exits with the command's exit code. Variables
+        and `module load` persist between commands. Commands longer than 540 s belong in a batch job.
+wait    Keeps waiting after a start or run timeout. Same exit codes.
+stop    Interrupts a running command, sends `exit`, confirms with bjobs or squeue that the job is gone, kills
+        that exact job id only if it still runs after 30 s, and only then closes the tmux session. If the
+        scheduler still lists the job, keeps the session and exits 1.
+attach  Prints the read-only attach command for a person who wants to watch.
+
+Exit codes: run and wait return the command's own code. Otherwise 0 ok, 1 stop could not confirm the end,
+2 refused (name, arguments, state), 124 timeout (the probe stays as it was: inspect, then wait or stop),
+125 the allocation or session is gone (rejected, released by the watchdog, walltime, exit). The last line of
+every call starts with "hpc-probe:" and says which case it was.
+
+Settings (environment): HPC_PROBE_DIR (state, default ~/.hpc-probe), HPC_PROBE_TMUX (tmux command, default
+"tmux"), HPC_PROBE_POLL (seconds between pane checks, default 2), HPC_PROBE_RESEND (seconds between readiness
+echoes, default 15).
+"""
+import fcntl
+import json
+import os
+import re
+import secrets
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+MAX_WAIT = 540
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+STATE_DIR = os.path.expanduser(os.environ.get("HPC_PROBE_DIR", "~/.hpc-probe"))
+TMUX = shlex.split(os.environ.get("HPC_PROBE_TMUX", "tmux"))
+POLL = float(os.environ.get("HPC_PROBE_POLL", "2"))
+RESEND = float(os.environ.get("HPC_PROBE_RESEND", "15"))
+OK, NOT_CONFIRMED, REFUSED, TIMEOUT, GONE = 0, 1, 2, 124, 125
+
+
+def done(code, msg):
+    print(f"hpc-probe: {msg}", flush=True)
+    sys.exit(code)
+
+
+def tmux(*args, check=False):
+    r = subprocess.run(TMUX + list(args), capture_output=True, text=True)
+    if check and r.returncode:
+        done(REFUSED, f"tmux {' '.join(args[:1])} failed: {r.stderr.strip()}")
+    return r
+
+
+def has_session(name):
+    return tmux("has-session", "-t", f"={name}").returncode == 0
+
+
+def pane(name):
+    r = tmux("capture-pane", "-p", "-J", "-t", f"={name}:", "-S", "-3000")
+    return r.stdout.splitlines() if r.returncode == 0 else None
+
+
+def send(name, text):
+    tmux("send-keys", "-t", f"={name}:", "-l", text, check=True)
+    tmux("send-keys", "-t", f"={name}:", "Enter", check=True)
+
+
+def state_path(name):
+    return os.path.join(STATE_DIR, name + ".json")
+
+
+def load(name):
+    try:
+        with open(state_path(name)) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
+
+def save(st):
+    tmp = state_path(st["name"]) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(st, f, indent=1)
+    os.replace(tmp, state_path(st["name"]))
+
+
+def lock(name):
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    fd = os.open(os.path.join(STATE_DIR, name + ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        done(REFUSED, f"another hpc-probe call is using {name}")
+    return fd
+
+
+def check_name(name):
+    if not NAME_RE.match(name or ""):
+        done(REFUSED, f"refused name {name!r}: use 1 to 64 letters, digits, '-' or '_', starting with a letter or digit")
+
+
+def bounded(t):
+    if t <= 0 or t > MAX_WAIT:
+        done(REFUSED, f"--timeout must be 1 to {MAX_WAIT} s. Longer work belongs in a batch job")
+    return t
+
+
+def short(host):
+    return host.split(".")[0].lower()
+
+
+def marker(st, kind):
+    return f"__HPCP_{st['token']}_{kind}"
+
+
+def scan(st, lines, pattern):
+    """Last match of a whole-line pattern, plus whether the allocation ended."""
+    hit = ended = None
+    for line in lines:
+        line = line.rstrip()
+        m = re.fullmatch(pattern, line)
+        if m:
+            hit = m
+        e = re.fullmatch(re.escape(marker(st, "ALLOC_ENDED_")) + r"(-?\d+)", line)
+        if e:
+            ended = int(e.group(1))
+    return hit, ended
+
+
+def job_id_from_pane(lines):
+    for line in lines or []:
+        m = re.search(r"Job <(\d+)> is submitted|srun: job (\d+) (?:queued|has been allocated)", line)
+        if m:
+            return m.group(1) or m.group(2)
+    return None
+
+
+def gone(st, why):
+    st["status"] = "ended"
+    save(st)
+    done(GONE, f"{st['name']}: allocation or session is gone ({why}). Confirm with "
+               f"{'bjobs' if st['sched'] == 'lsf' else 'squeue'} and run `hpc-probe stop {st['name']}`")
+
+
+# ---------------------------------------------------------------- start
+def cmd_start(name, timeout, argv):
+    check_name(name)
+    fd = lock(name)
+    old = load(name)
+    if has_session(name) or (old and old.get("status") != "stopped"):
+        done(REFUSED, f"name {name} is in use. Pick a new name")
+    if not argv:
+        done(REFUSED, "give the allocation command after --")
+    exe = os.path.basename(argv[0])
+    if exe == "bsub":
+        sched, interactive, walltime = "lsf", "-Is" in argv, "-W" in argv
+    elif exe == "srun":
+        sched = "slurm"
+        interactive = "--pty" in argv
+        walltime = any(a in ("-t", "--time") or a.startswith("--time=") for a in argv)
+    else:
+        done(REFUSED, "the allocation command must be bsub -Is or srun --pty")
+    if not interactive:
+        done(REFUSED, f"{exe} needs {'-Is' if sched == 'lsf' else '--pty'} for an interactive shell")
+    if not walltime:
+        done(REFUSED, "set a short walltime (-W for bsub, --time for srun)")
+    if not any(os.path.basename(a).startswith("hpc-session") for a in argv[1:]):
+        done(REFUSED, "run the shell under hpc-session (or hpc-session-slurm), which releases an idle job")
+    path = shutil.which(argv[0])
+    if not path:
+        done(REFUSED, f"{argv[0]} not found on PATH")
+    cwd = os.getcwd()
+    st = {"name": name, "token": secrets.token_hex(4), "sched": sched, "argv": [path] + argv[1:], "cwd": cwd,
+          "log_dir": os.path.join(cwd, "hpc-probe-logs", name), "login_host": socket.gethostname(),
+          "status": "starting", "job_id": None, "host": None, "counter": 0, "pending": None,
+          "created": time.strftime("%Y-%m-%d %H:%M:%S")}
+    os.makedirs(st["log_dir"], exist_ok=True)
+    env_file = state_path(name) + ".env"
+    fd_env = os.open(env_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd_env, "w") as f:
+        json.dump(dict(os.environ), f)
+    save(st)
+    launch = " ".join(shlex.quote(x) for x in (sys.executable, os.path.abspath(__file__), "_launch", name))
+    tmux("new-session", "-d", "-s", name, "-x", "250", "-y", "50", "-c", cwd, launch, check=True)
+    print(f"hpc-probe: {name}: started {' '.join(argv[:2])} ... in tmux session {name}, waiting for the job's shell",
+          flush=True)
+    wait_ready(st, timeout)
+
+
+def cmd_launch(name):
+    """Runs inside the tmux session: the allocation command, then the end marker. Never a shell."""
+    st = load(name)
+    env_file = state_path(name) + ".env"
+    with open(env_file) as f:
+        env = json.load(f)
+    os.unlink(env_file)
+    for s in (signal.SIGINT, signal.SIGQUIT, signal.SIGTSTP):
+        signal.signal(s, signal.SIG_IGN)   # Ctrl-C belongs to the job, not to this launcher
+
+    def child():
+        for s in (signal.SIGINT, signal.SIGQUIT, signal.SIGTSTP):
+            signal.signal(s, signal.SIG_DFL)
+    rc = subprocess.call(st["argv"], env=env, cwd=st["cwd"], preexec_fn=child)
+    print(f"\n{marker(st, 'ALLOC_ENDED_')}{rc}", flush=True)
+    time.sleep(600)   # keep the pane readable. Keys typed now go to nobody
+
+
+def wait_ready(st, timeout):
+    name = st["name"]
+    ready_re = re.escape(marker(st, "READY_")) + r"(\d+)_(\S+)"
+    probe = f'echo "{marker(st, "READY_")}${{LSB_JOBID:-${{SLURM_JOB_ID:-none}}}}_$(hostname)"'
+    t_end, next_send, gap = time.time() + timeout, 0.0, RESEND
+    while True:
+        lines = pane(name)
+        if lines is None:
+            gone(st, "tmux session closed before the job started")
+        hit, ended = scan(st, lines, ready_re)
+        if not st.get("job_id"):
+            st["job_id"] = job_id_from_pane(lines)
+        if hit:
+            job, host = hit.group(1), hit.group(2)
+            if short(host) == short(st["login_host"]):
+                st["status"] = "refused"
+                save(st)
+                done(REFUSED, f"{name}: the shell reports host {host}, which is this login node. Sent no work. "
+                              f"Run `hpc-probe stop {name}`")
+            st.update(status="ready", job_id=job, host=host)
+            save(st)
+            print(f"name={name} job={job} host={host} sched={st['sched']} log_dir={st['log_dir']}")
+            done(OK, f"{name}: ready. Send commands with `hpc-probe run {name} -- '<cmd>'`")
+        if ended is not None:
+            gone(st, f"the allocation command exited with {ended} before the job's shell answered")
+        if time.time() >= t_end:
+            save(st)
+            done(TIMEOUT, f"{name}: no job shell after {timeout:.0f} s (job {st.get('job_id') or 'id unknown'}, "
+                          f"probably still pending). Keep waiting with `hpc-probe wait {name}`, check "
+                          f"{'bjobs -p -l' if st['sched'] == 'lsf' else 'squeue -j'} <id>, or `hpc-probe stop {name}`")
+        if time.time() >= next_send:
+            send(name, probe)   # repeated echoes are harmless, and the answer does not depend on type-ahead
+            next_send, gap = time.time() + gap, min(gap * 2, 120)
+        time.sleep(POLL)
+
+
+# ---------------------------------------------------------------- run, wait
+def usable(name):
+    check_name(name)
+    st = load(name)
+    if not st:
+        done(REFUSED, f"no probe named {name}. Start one with `hpc-probe start {name} -- ...`")
+    if st["status"] in ("ended", "stopped", "refused"):
+        done(GONE if st["status"] == "ended" else REFUSED, f"{name} is {st['status']}. Start a new probe")
+    if not has_session(name):
+        gone(st, "tmux session not found")
+    return st
+
+
+def cmd_run(name, timeout, tail, argv):
+    st = usable(name)
+    fd = lock(name)
+    st = load(name)
+    if st["status"] != "ready":
+        done(REFUSED, f"{name} is not ready ({st['status']}). Use `hpc-probe wait {name}`")
+    if st.get("pending"):
+        lines = pane(name) or []
+        hit, _ = scan(st, lines, re.escape(marker(st, f"{st['pending']}_END_")) + r"(\d+)")
+        if not hit:
+            done(REFUSED, f"{name}: command {st['pending']} has not ended. `hpc-probe wait {name}` or "
+                          f"`hpc-probe stop {name}`")
+        st["pending"] = None
+    if not argv:
+        done(REFUSED, "give the command after --")
+    cmd = (argv[0] if len(argv) == 1 else shlex.join(argv)).strip().rstrip(";").rstrip()
+    if "\n" in cmd or not cmd.strip():
+        done(REFUSED, "one non-empty line only. Put longer work in a script")
+    if re.search(r"&\s*$", cmd):
+        done(REFUSED, "no background commands. Use a batch job")
+    st["counter"] += 1
+    n = st["counter"]
+    log = os.path.join(st["log_dir"], f"{n}.log")
+    st["pending"] = n
+    save(st)
+    send(name, f'{{ {cmd} ; }} > {shlex.quote(log)} 2>&1 < /dev/null; echo "{marker(st, f"{n}_END_")}$?"')
+    wait_cmd(st, n, timeout, tail)
+
+
+def wait_cmd(st, n, timeout, tail):
+    name, t_end = st["name"], time.time() + timeout
+    end_re = re.escape(marker(st, f"{n}_END_")) + r"(\d+)"
+    log = os.path.join(st["log_dir"], f"{n}.log")
+    while True:
+        lines = pane(name)
+        if lines is None:
+            gone(st, "tmux session closed")
+        hit, ended = scan(st, lines, end_re)
+        if hit:
+            rc = int(hit.group(1))
+            st["pending"] = None
+            save(st)
+            try:
+                with open(log, errors="replace") as f:
+                    out = f.read().splitlines()[-tail:] if tail else []
+            except FileNotFoundError:
+                out = ["(no log file: is the run folder on storage the job can write?)"]
+            print("\n".join(out))
+            print(f"hpc-probe: {name}: command {n} exit {rc}, log {log}", flush=True)
+            sys.exit(rc)
+        if ended is not None:
+            gone(st, f"the allocation ended with {ended} during command {n}")
+        if time.time() >= t_end:
+            done(TIMEOUT, f"{name}: command {n} still running after {timeout:.0f} s. Inspect `tail {log}` or "
+                          f"`hpc-probe attach {name}`, then `hpc-probe wait {name}` or `hpc-probe stop {name}`. "
+                          f"Work longer than {MAX_WAIT} s belongs in a batch job")
+        time.sleep(POLL)
+
+
+def cmd_wait(name, timeout, tail):
+    st = usable(name)
+    fd = lock(name)
+    st = load(name)
+    if st["status"] == "starting":
+        wait_ready(st, timeout)
+    if st.get("pending"):
+        wait_cmd(st, st["pending"], timeout, tail)
+    done(OK, f"{name}: nothing to wait for")
+
+
+# ---------------------------------------------------------------- stop, attach
+def sched_state(st):
+    """'gone', 'running' or 'unknown' for the job id, from bjobs or squeue."""
+    jid = st.get("job_id")
+    if not jid:
+        return "unknown"
+    try:
+        if st["sched"] == "lsf":
+            r = subprocess.run(["bjobs", "-noheader", "-o", "stat", jid], capture_output=True, text=True, timeout=60)
+            out = (r.stdout + r.stderr).strip()
+            if "is not found" in out or out.split()[-1:] in (["DONE"], ["EXIT"]):
+                return "gone"
+            return "running" if out.split()[-1:] and out.split()[-1].isupper() else "unknown"
+        r = subprocess.run(["squeue", "-h", "-j", jid, "-o", "%T"], capture_output=True, text=True, timeout=60)
+        if (r.returncode == 0 and not r.stdout.strip()) or "Invalid job id" in r.stderr:
+            return "gone"
+        return "running" if r.returncode == 0 else "unknown"
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+
+
+def cmd_stop(name):
+    check_name(name)
+    fd = lock(name)
+    st = load(name)
+    if not st:
+        done(REFUSED, f"no probe named {name}")
+    if st["status"] == "stopped":
+        done(OK, f"{name} is already stopped")
+    lines = pane(name)
+    if not st.get("job_id"):
+        st["job_id"] = job_id_from_pane(lines)
+    if lines is not None and st["status"] == "ready":
+        if st.get("pending"):
+            tmux("send-keys", "-t", f"={name}:", "C-c")
+            time.sleep(2)
+        send(name, "exit")
+    t_end = time.time() + (30 if st["status"] == "ready" else 0)
+    state = sched_state(st)
+    while state != "gone" and time.time() < t_end:
+        time.sleep(POLL)
+        state = sched_state(st)
+    if state == "running":
+        kill = ["bkill", st["job_id"]] if st["sched"] == "lsf" else ["scancel", st["job_id"]]
+        r = subprocess.run(kill, capture_output=True, text=True)
+        print(f"{' '.join(kill)}: {(r.stdout + r.stderr).strip()}")
+        t_end = time.time() + 120
+        while state != "gone" and time.time() < t_end:
+            time.sleep(max(POLL, 1))
+            state = sched_state(st)
+    if state != "gone":
+        save(st)
+        done(NOT_CONFIRMED, f"{name}: the scheduler does not confirm that job {st.get('job_id') or '(id unknown)'} "
+                            f"has ended ({state}). The tmux session stays. Keep monitoring and report")
+    if has_session(name):
+        tmux("kill-session", "-t", f"={name}")
+    st["status"] = "stopped"
+    save(st)
+    done(OK, f"{name}: job {st['job_id']} is gone and the tmux session is closed")
+
+
+def cmd_attach(name):
+    check_name(name)
+    print(" ".join(shlex.quote(x) for x in TMUX + ["attach", "-r", "-t", f"={name}"]))
+    done(OK, "read-only (-r). Detach with Ctrl-b d")
+
+
+# ---------------------------------------------------------------- main
+def main(args):
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__)
+        sys.exit(0 if args else REFUSED)
+    action, rest = args[0], args[1:]
+    if action == "_launch":
+        return cmd_launch(rest[0])
+    if not rest:
+        done(REFUSED, f"{action}: give a probe name")
+    name, rest = rest[0], rest[1:]
+    opts, argv = rest, []
+    if "--" in rest:
+        i = rest.index("--")
+        opts, argv = rest[:i], rest[i + 1:]
+    timeout, tail = float(MAX_WAIT), 20
+    it = iter(opts)
+    for o in it:
+        try:
+            if o == "--timeout":
+                timeout = bounded(float(next(it)))
+            elif o == "--tail":
+                tail = int(next(it))
+            else:
+                done(REFUSED, f"unknown option {o!r}")
+        except (StopIteration, ValueError):
+            done(REFUSED, f"{o} needs a number")
+    if action == "start":
+        cmd_start(name, timeout, argv)
+    elif action == "run":
+        cmd_run(name, timeout, tail, argv)
+    elif action == "wait":
+        cmd_wait(name, timeout, tail)
+    elif action == "stop":
+        cmd_stop(name)
+    elif action == "attach":
+        cmd_attach(name)
+    else:
+        done(REFUSED, f"unknown action {action!r}. See --help")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
