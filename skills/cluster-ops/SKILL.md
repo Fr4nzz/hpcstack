@@ -10,11 +10,10 @@ scheduler, the job's status file and its outputs.
 
 ## Know the site
 
-Read `sites/<site>.md` from this repo if the cluster has one, and the user's `CLAUDE.md`/`AGENTS.md` for their
-group and scratch path. Otherwise discover once (`lsid` or `sinfo -s`, `bqueues`, `lfs df -h`, `findmnt -T "$PWD"`)
-and ask the user to confirm. Check queue limits with `bqueues -l <queue>` instead of recalling them, and whether
-`-M` counts per job or per core (`LSB_JOB_MEMLIMIT`, `LSF_UNIT_FOR_LIMITS`). LSF: `references/lsf.md`. SLURM:
-`references/slurm.md`.
+Read this repo's `sites/<site>.md` if the cluster has one, and the user's `CLAUDE.md`/`AGENTS.md` for their group
+and scratch path. Otherwise discover once (`lsid` or `sinfo -s`, `bqueues`, `lfs df -h`, `findmnt -T "$PWD"`) and ask
+the user to confirm. Check queue limits (`bqueues -l <queue>`) rather than recall them, and whether `-M` counts per
+job or per core (`LSB_JOB_MEMLIMIT`, `LSF_UNIT_FOR_LIMITS`). LSF: `references/lsf.md`. SLURM: `references/slurm.md`.
 
 ## Login-node etiquette
 
@@ -34,20 +33,23 @@ sessions one at a time, after checking that each is an idle shell.
   runtime and upload with the local GPU's measured time. Take the faster and say why.
 
 ```bash
-tmux new -d -s probe      # on the login node. SLURM: srun ... --pty .../hpc-session-slurm
-tmux send-keys -t probe 'bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00 \
-  -wa USR2 -wt 10 /path/to/hpcstack/skills/cluster-ops/scripts/hpc-session' Enter
+S=probe-$(date +%m%d-%H%M%S); echo "$S"   # login node, run folder. A fresh name, reused in every later call
+tmux new -d -s "$S" -x 250 'bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00 \
+  -wa USR2 -wt 10 /path/to/cluster-ops/scripts/hpc-session; echo "__ALLOC_ENDED_$?"; sleep 600' || exit 1
 ```
 
-- Send one command at a time with `tmux send-keys -t probe '<cmd>' Enter`, wait for the prompt, then read the
-  result with `tmux capture-pane -p -t probe -S -200` or from a log file the command writes.
+- tmux runs `bsub` itself, with no login shell under it, and refuses a name in use (SLURM: `srun ... --pty
+  .../hpc-session-slurm`). Send no work until `echo "__READY_${LSB_JOBID:-none}_$(hostname)"` prints a job id and
+  a compute host. End each command with its own numbered marker (`; echo "__END_3_$?"`), wait in one bounded
+  call for that whole line or `__ALLOC_ENDED_` in `tmux capture-pane`, then read the log. Steps and settings:
+  `references/interactive.md`.
 - `-W 2:00` is the hard backstop. Many sites refuse to extend a running job, so choose it up front.
-- `hpc-session` releases the job once nobody types and the job's CPU and GPUs are idle. A training inside it
-  keeps the job alive. Thresholds, settings and prompt checks: `references/interactive.md`.
+- `hpc-session` releases the job once nobody types and the job's CPU and GPUs are idle. A training inside it keeps
+  the job alive.
 - Ask for what the probe needs (1 GPU, a few cores, measured memory). CPU-only work goes to a CPU queue. Record
-  the job id, tmux session and purpose where the user can see them.
+  the job id, tmux session and purpose where the user can see them (to watch: `tmux attach -r -t <session>`).
 - End in this order: `exit` the shell, confirm with `bjobs`/`squeue` that the job is gone (if it still runs after
-  30 s, kill that exact id and poll until DONE or EXIT), and only then `tmux kill-session -t probe`. Closing tmux
+  30 s, kill that exact id and poll until DONE or EXIT), and only then `tmux kill-session -t "=$S"`. Closing tmux
   does not reliably end the job.
 
 ## Size the request
@@ -55,7 +57,7 @@ tmux send-keys -t probe 'bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] 
 Over-requesting is not safe padding: it lengthens the wait, burns fairshare and blocks co-tenants. Measure with
 `scripts/jobeff <ids>` (`--lsf-log logs/*.out`, `--slurm <id>`, `--user`): efficiency, peak memory, flags and a
 suggested next request. For GPUs, sample `nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv -l 10`.
-Raw fields, flags, the ledger and the preflight receipt: `references/sizing.md`.
+Raw fields, the ledger and the receipt: `references/sizing.md`.
 
 - **Memory**: `-M` about 1.3 x the measured peak (cgroup RSS, not page cache), rounded up to the next 500 MB.
   With no measurement yet, say so and start modest. After a memory kill, find what grew instead of raising `-M` again.
@@ -73,12 +75,11 @@ Raw fields, flags, the ledger and the preflight receipt: `references/sizing.md`.
 - **Re-size every resubmit** at submit time: reused scripts keep their old numbers.
 - **Count the hosts** that pass the GPU filter before several GPU runs. If your runs exceed them, order the runs
   or fit the next GPU class.
-- Never cut `-M` below the measured peak, or cores below the measured best, to start sooner. Find out why it
-  pends (Recover).
+- Never cut `-M` or cores below what was measured just to start sooner. Find out why it pends (Recover).
 - Append each verified run to the project's ledger, and read it before sizing a new job.
 - PEND time cannot be predicted. `scripts/pendlog` logs waits and `scripts/pend-risk` gives the share of similar
   recent jobs that waited over 1 h (`references/sizing.md`, untested on a cluster).
-- Genomics batch work (arrays per sample, thread flags, Java heaps, reads to linkage map): `references/genomics.md`.
+- Genomics batch work (arrays per sample, Java heaps, linkage maps): `references/genomics.md`.
 
 **Preflight.** Before anything goes to the scheduler, resolve every "no" (an unmeasured first run gets a modest
 request, labelled as such). If you cannot resolve one, report it and wait for the user. Write the receipt to
@@ -90,8 +91,9 @@ request, labelled as such). If you cannot resolve one, report it and wait for th
    to be needed and the user agreed.
 3. Independent units are an array with a cap (`%N`) of tens, not hundreds (unless tasks are tiny and the queue
    is quiet), so it never takes a whole queue. No duplicate or speculative copies (check `bjobs` first).
-4. Quota checked, bytes and files (`scripts/quota_report.sh <mount> <group> --gate`). New files counted, packed
-   above about 50 per run. Temp files and expanded archives on node-local disk. Output to a new versioned directory.
+4.  Quota checked, bytes and files (`scripts/quota_report.sh <mount> <group> --gate`). Expected new file count
+   recorded. Pack above about 50 per run. Temp files and expanded archives on node-local disk. Output to a new
+   versioned directory.
 5. The job writes `status.json`, checkpoints, traps the walltime warning and cleans up. Dependencies use exact ids.
 6. Every variant was dry-built on CPU in the job's own environment (imports, then data assembly).
 7. You know what "finished correctly" looks like: files, counts, checksums.
@@ -121,11 +123,11 @@ Job scripts start from `references/job-script-template.sh`:
 
 ## Workflow managers
 
-A pipeline of hand-written scripts or chained `bsub` jobs (reruns by hand, no resume, outputs overwritten) is
-worth moving to Nextflow, or to an nf-core or sanger-tol pipeline that fits. With `-resume`, Nextflow reuses
-completed tasks whose cache and outputs remain valid, and its trace sizes each step. nf-core pipelines also retry a
-killed task with more resources and accept site profiles. A Nextflow workflow you write yourself gets these only
-from its own config. Recommend the move and let the user decide. Docs:
+A pipeline of hand-written scripts or chained `bsub` jobs (reruns by hand, no resume, outputs overwritten) is worth
+moving to Nextflow, or to an nf-core or sanger-tol pipeline that fits. With `-resume`, Nextflow reuses completed
+tasks whose cache and outputs remain valid, and its trace shows what each step used. nf-core pipelines also retry a
+killed task with more resources and accept site profiles. A Nextflow workflow you write yourself gets these only from
+its own config. Recommend the move and let the user decide. Docs:
 [Nextflow](https://www.nextflow.io/docs/latest/), [nf-core](https://nf-co.re/docs/),
 [nf-core/configs](https://github.com/nf-core/configs) (site profiles).
 
@@ -171,9 +173,8 @@ originals. Log every deletion, never touch other users' files, and report the qu
 delete the source data of a trained or deployed model: pack it under a permanent folder with a README. Big wins,
 local disks and prevention: `references/storage.md`.
 
-Transfers can arrive truncated without an error: compare `sha256sum` on both sides. Check an exact path with
-`stat` before concluding a file is missing. When streaming over ssh (`ssh host 'tar -c ...' > file`), the remote
-command must print nothing else on stdout.
+A transfer can arrive silently truncated: compare `sha256sum` on both sides. Check an exact path with `stat` before
+concluding a file is missing. Over ssh (`ssh host 'tar -c ...' > file`), stdout must carry only the stream.
 
 ## Recover
 

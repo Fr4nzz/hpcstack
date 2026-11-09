@@ -25,23 +25,42 @@ On a new site, run once with `HPC_DRY_RUN=1 HPC_IDLE_MIN=5` and check that the l
 
 ## Driving the session from an agent
 
-The agent works through the detached tmux session from SKILL.md, one command at a time:
+Each step is a separate tool call. Write the printed session name into every later one (here `probe-1108-143005`).
 
 ```bash
-tmux new -d -s probe                                          # on the login node
-tmux send-keys -t probe 'bsub -Is ... hpc-session' Enter
-tmux capture-pane -p -t probe -S -200 | tail -5               # repeat until the job's shell prompt shows
-tmux send-keys -t probe 'python check.py > probe.log 2>&1; echo "__END_$?"' Enter
-tmux capture-pane -p -t probe -S -200 | grep '__END_[0-9]'    # repeat until it matches, then read probe.log
+# 1. A new session whose command is the submission itself. tmux refuses a name in use: then pick another.
+S=probe-$(date +%m%d-%H%M%S); echo "$S"
+tmux new -d -s "$S" -c "$PWD" -x 250 'bsub -Is ... hpc-session; echo "__ALLOC_ENDED_$?"; sleep 600' || exit 1
+
+# 2. Wait for the start, then prove the shell is in the job.
+S=probe-1108-143005
+timeout 3600 bash -c 'until tmux capture-pane -p -J -t "=$0:" -S -200 |
+  grep -Eq "^<<Starting on|^__ALLOC_ENDED_"; do sleep 10; done' "$S"
+tmux send-keys -t "=$S:" 'echo "__READY_${LSB_JOBID:-none}_$(hostname)"' Enter
+timeout 60 bash -c 'until tmux capture-pane -p -J -t "=$0:" -S -200 |
+  grep -Eqx "__READY_[0-9]+_.+|__ALLOC_ENDED_[0-9]+"; do sleep 2; done' "$S"
+tmux capture-pane -p -J -t "=$S:" -S -200 | grep -Ex '__READY_[0-9]+_.+|__ALLOC_ENDED_[0-9]+'
+
+# 3. One command, its own numbered marker, one bounded wait, then the log.
+tmux send-keys -t "=$S:" 'python check.py > probe-3.log 2>&1; echo "__END_3_$?"' Enter
+timeout 900 bash -c 'until tmux capture-pane -p -J -t "=$0:" -S -200 |
+  grep -Eqx "__END_3_[0-9]+|__ALLOC_ENDED_[0-9]+"; do sleep 10; done' "$S"
+tmux capture-pane -p -J -t "=$S:" -S -200 | grep -Ex '__END_3_[0-9]+|__ALLOC_ENDED_[0-9]+'
+tail -20 probe-3.log
 ```
 
-- `bsub -Is` prints `<<Waiting for dispatch ...>>` until the job starts. Keys sent before the shell prompt
-  appears go to `bsub` or to the running command, not to the shell.
-- The `__END_` marker shows that the command finished and carries its exit code. The typed line shows the literal
-  `__END_$?`, so only the output matches `__END_[0-9]`.
-- The pane holds only recent lines (`-S -200` reads 200 back). Send long output to a log file and read it with
-  `tail` or `grep`.
-- `tmux send-keys -t probe C-c` interrupts a command that hangs.
+- The session runs `bsub` with no login shell under it. Keys sent while the job pends, after a rejected
+  submission, or after the job ends (watchdog release, walltime, `exit`) reach no shell on the login node.
+- Send work only after the `__READY_` line shows a numeric job id and a host other than the login node. SLURM
+  prints no `<<Starting on`, so send the readiness line once `srun` reports the allocation and match `SLURM_JOB_ID`.
+- Number each marker anew, because the pane still holds the earlier ones. `grep -x` matches only a whole output
+  line, never the typed line with its literal `$?`. On a nonzero code, read the log before sending anything else.
+- Every wait is one bounded call that also stops on `__ALLOC_ENDED_`. After that, the allocation is gone: start a
+  new session with a new name.
+- `-t "=$S:"` targets that exact session. A bare `-t probe` also matches a longer name such as `probe-other`.
+- The pane holds only recent lines (`-S -200` reads 200 back). Send long output to a log file in the run folder,
+  which the login node can read. `tmux send-keys -t "=$S:" C-c` interrupts a command that hangs.
+- A person can watch with `tmux attach -r -t <session>` (`-r` keeps it read-only, `Ctrl-b d` detaches).
 
 ## Rules
 
@@ -57,6 +76,13 @@ Good: `hpc-session` with `-W 2:00`. The agent stops, and the watchdog releases t
   about two minutes after the idle limit.
 - A GPU-bound job (100 % GPU, near-zero CPU, no typing, 20 s GPU pauses every minute) stayed alive and was
   released about 3 minutes after the GPU work stopped.
-- The `__END_` marker and `capture-pane` steps work in a local tmux shell. Not yet run inside a cluster job.
+- The agent steps above run as written in `tests/test_interactive_recipe.py`: local tmux 3.7, a private socket,
+  and a fake `bsub -Is` that pends 2 s and then starts a shell with `LSB_JOBID` set, or is rejected with exit 255.
+  Checked: a second `tmux new` with the same name fails, the readiness line names the job, the wait for
+  `__END_4_` lasts for the 3 s command although `__END_3_3` is still on screen, and after a rejection the wait
+  ends on `__ALLOC_ENDED_255` and keys typed ahead run nowhere. A longer manual run also checked that `=name:`
+  resolves only the exact session and that keys sent after `exit` run nowhere.
+- Not yet run with real `bsub -Is` or `srun --pty`: the `<<Starting on` text, whether `bsub` passes on keys typed
+  while pending, and the SLURM readiness step are unchecked.
 - Not yet tested: `hpc-session-slurm`, several GPUs in one job, another tenant on the same GPU, and the
   scheduler's own pre-kill warning.
