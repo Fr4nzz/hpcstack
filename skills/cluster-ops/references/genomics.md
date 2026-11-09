@@ -1,4 +1,4 @@
-# Genomics batch work: a short summary
+# Genomics batch work
 
 Practical rules, not an expert guide. Check each tool's flags against its own documentation.
 

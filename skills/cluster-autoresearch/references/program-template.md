@@ -31,8 +31,8 @@ Check hashes at the start of every wave with `sha256sum -c pinned.sha256`. A mis
 
 ## 4. Budget and stop rule
 
-- Total: `<GPU-hours or core-hours>`. Wall-clock end: `<date and time>`.
-- Per wave: `<8 to 12>` runs, about `<GPU-hours>` GPU-h. Concurrency cap: `<jobs>`.
+- Total: `<number>` GPU-hours (or core-hours). Wall-clock end: `<date and time>`.
+- Per wave: `<8 to 12>` runs, about `<hours>` GPU-h. Concurrency cap: `<jobs>`.
 - Stop when the budget is spent, the end time is reached, or `<waves>` waves in a row have no keep.
 - Ask the user before changing the metric or data, opening locked data, or exceeding the budget.
 

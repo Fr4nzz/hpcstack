@@ -13,8 +13,8 @@ budget and a stop rule, and each wave (one batch of experiments run together) is
 
 ## Before the first wave: agree the plan
 
-Write `program.md` from `references/program-template.md`. Start once the user's approval covers its metric,
-editable file and budget, and ask for any part it leaves open. It fixes:
+Write `program.md` from `references/program-template.md`. Start once the user has approved its metric, editable file
+and budget. Ask for any part still open. It fixes:
 
 - **Metric and data split.** One primary metric. A development split for decisions. Locked test sets are
   opened only by a logged `confirm` step that the user approves.

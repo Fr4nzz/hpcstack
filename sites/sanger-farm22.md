@@ -22,8 +22,7 @@ Verify every limit on the cluster before relying on it.
   up front and resubmit if it runs out.
 - A running job's `-M` cannot be changed, and the site esub can refuse `bmod -R` or `bmod -mn` on pending
   GPU jobs. Resubmit instead.
-- Users cannot ssh to compute nodes, so nobody can rescue a running job from outside. The job itself must
-  publish anything worth saving.
+- Users cannot ssh to compute nodes to rescue a job. The job must publish anything it needs to save.
 - Idle-job exceptions: `bqueues -l <queue> | grep -A2 -i idle`. They notify only and are not defined on every
   queue, so they are no substitute for `hpc-session` (`cluster-ops`).
 
@@ -40,10 +39,10 @@ Verify every limit on the cluster before relying on it.
 | `gpu-basement` | GPU tasks over 7 days |
 | `oversubscribed` | the Nextflow head job in the nf-core docs example |
 
-Other queues exist, among them interactive and transfer queues (for an interactive session an agent can drive,
-see `cluster-ops`, "Interactive or batch"). List them with `bqueues` and read limits with `bqueues -l <queue>`.
-The nf-core profile caps tasks at 256 cores, 3.8 TB of memory and 30 days, which reflects the largest hosts and
-queues. Check GPU host groups with `bqueues -l gpu | grep HOSTS` and `bhosts -gpu`.
+Other queues exist, such as interactive and transfer (agent-driven interactive sessions: `cluster-ops`, "Interactive
+or batch"). List them with `bqueues` and read limits with `bqueues -l <queue>`. The nf-core profile caps tasks at 256
+cores, 3.8 TB of memory and 30 days, which reflects the largest hosts and queues. Check GPU host groups with
+`bqueues -l gpu | grep HOSTS` and `bhosts -gpu`.
 
 ## GPUs
 

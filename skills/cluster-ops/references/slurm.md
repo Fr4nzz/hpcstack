@@ -31,4 +31,4 @@ Differences that bite:
 - SLURM users usually cannot raise `TimeLimit` on a running job. Pick a modest `--time` for interactive work
   and rely on the `scripts/hpc-session-slurm` watchdog.
 - `seff` reports CPU and memory efficiency directly. `MaxRSS` is per step, so take the maximum over steps.
-- SLURM's `afterany` is LSF's `ended()` and fires on failure too. LSF's `done()` is `afterok`.
+- SLURM's `afterany` is LSF's `ended()` and fires on failure too. Choose between them as in `lsf.md`, Dependencies.

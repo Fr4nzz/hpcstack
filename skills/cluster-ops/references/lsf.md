@@ -1,6 +1,6 @@
 # LSF quick reference
 
-Values differ between clusters and change over time, so check every limit on your own site.
+Limits differ between sites and change over time. Check them on yours.
 
 ## Discover
 
@@ -61,8 +61,7 @@ too. Resubmit instead. A successful `bkill` replies that the job "is being termi
 
 ## Dependencies
 
-- `done(<id>)` fires only on exit 0. Use it for an upstream whose exit 0 means verified work, with an EXIT trap
-  that keeps that code.
+- Use `done(<id>)` only when the upstream exits 0 after verified work and its EXIT trap preserves that code.
 - An upstream that may end non-zero with usable output (an array with killed and retried elements, a job whose
   cleanup you don't control) gets `ended(<id>)`. The dependent first checks every required output (status file,
   receipts, counts) and exits non-zero if any is missing.
