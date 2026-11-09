@@ -1,13 +1,13 @@
 {
   "name": "hpcstack",
   "version": "0.2.0",
-  "description": "Agent skills for shared HPC clusters (LSF and SLURM): submit, size, monitor and recover jobs, release idle interactive sessions, audit storage, optimise slow steps and run budgeted experiment loops.",
+  "description": "Agent skills for shared HPC clusters that run LSF: submit, size, monitor and recover jobs, release idle interactive sessions, audit storage, optimise slow steps and run budgeted experiment loops.",
   "author": {
     "name": "hpcstack contributors"
   },
   "repository": "https://github.com/<owner>/hpcstack",
   "license": "MIT",
-  "keywords": ["hpc", "lsf", "slurm", "cluster", "gpu", "nextflow", "lustre", "skills"],
+  "keywords": ["hpc", "lsf", "cluster", "gpu", "nextflow", "lustre", "skills"],
   "skills": [
     "./skills/cluster-ops",
     "./skills/optimize-pipeline",

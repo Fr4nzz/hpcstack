@@ -21,8 +21,6 @@ spent in failed or killed jobs, then fix the steps that lose the most.
   time = TURNAROUND - WAIT).
 - Every LSF `.out` file ends with a "Resource usage summary", often the most reliable source months later. Cores
   come from `executed on host(s) <8*node>` (no `N*` means 1).
-- SLURM: `sacct -j <id> -P -o JobID,State,Elapsed,TotalCPU,AllocCPUS,ReqMem,MaxRSS` or `seff <id>`. `MaxRSS` is
-  per step, so take the maximum over steps.
 
 ## Nextflow trace
 

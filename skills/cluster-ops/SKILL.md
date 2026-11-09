@@ -1,6 +1,6 @@
 ---
 name: cluster-ops
-description: Submit, size and monitor jobs on a shared LSF or SLURM cluster, and clean up its storage. Use when the user says "run this on the cluster", "submit a job", "why is my job pending?", "check my jobs", "how much memory should I ask for?", "why was my job killed?", "give me a GPU shell", "we're over quota", "what can I delete?" or "run this nf-core pipeline", or pastes a `bsub` or `sbatch` command, and before you ssh to a login node, write a job script or open an interactive allocation.
+description: Submit, size and monitor jobs on a shared LSF cluster, and clean up its storage. Use when the user says "run this on the cluster", "submit a job", "why is my job pending?", "check my jobs", "how much memory should I ask for?", "why was my job killed?", "give me a GPU shell", "we're over quota", "what can I delete?" or "run this nf-core pipeline", or pastes a `bsub` command, and before you ssh to a login node, write a job script or open an interactive allocation.
 ---
 
 # Cluster operations
@@ -10,10 +10,10 @@ scheduler, the job's status file and its outputs.
 
 ## Know the site
 
-Read this repo's `sites/<site>.md` if the cluster has one, and the user's `CLAUDE.md`/`AGENTS.md` for their group
-and scratch path. Otherwise discover once (`lsid` or `sinfo -s`, `bqueues`, `lfs df -h`, `findmnt -T "$PWD"`) and ask
-the user to confirm. Check queue limits (`bqueues -l <queue>`) rather than recall them, and whether `-M` counts per
-job or per core (`LSB_JOB_MEMLIMIT`, `LSF_UNIT_FOR_LIMITS`). LSF: `references/lsf.md`. SLURM: `references/slurm.md`.
+Read this repo's `sites/<site>.md` if the cluster has one, and the user's `CLAUDE.md`/`AGENTS.md` for their group and
+scratch path. Otherwise discover once (`lsid`, `bqueues`, `lfs df -h`, `findmnt -T "$PWD"`) and ask the user to
+confirm. Check queue limits (`bqueues -l <queue>`) rather than recall them, and whether `-M` counts per job or per
+core (`LSB_JOB_MEMLIMIT`, `LSF_UNIT_FOR_LIMITS`). LSF details: `references/lsf.md`.
 
 ## Login-node etiquette
 
@@ -33,7 +33,7 @@ sessions one at a time, each checked to be an idle shell.
   runtime and upload with the local GPU's measured time. Take the faster and say why.
 
 ```bash
-P=/path/to/cluster-ops/scripts/hpc-probe   # login node, run folder. SLURM: srun --pty --time=... instead
+P=/path/to/cluster-ops/scripts/hpc-probe   # login node, run folder
 $P start probe-<task> -- bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00 \
    -wa USR2 -wt 10                             # options only: hpc-probe adds the command
 $P run probe-<task> -- 'python check.py --quick'   # waits up to 540 s, returns the command's exit code
@@ -49,15 +49,15 @@ $P stop probe-<task>
   keeps the job alive.
 - Ask for what the probe needs (1 GPU, a few cores, measured memory). CPU-only work goes to a CPU queue. Record
   the job id, probe name and purpose where the user can see them (`$P attach` prints a read-only view).
-- `stop` exits the shell, confirms with `bjobs`/`squeue` that the job ended (killing that exact id if needed), and
-  only then closes the pane. An unclear answer keeps the pane (exit 1): monitor and report.
+- `stop` exits the shell, confirms with `bjobs` that the job ended (killing that exact id if needed), and only then
+  closes the pane. An unclear answer keeps the pane (exit 1): monitor and report.
 
 ## Size the request
 
 Over-requesting is not safe padding: it lengthens the wait, burns fairshare and blocks co-tenants. Measure with
-`scripts/jobeff <ids>` (`--lsf-log logs/*.out`, `--slurm <id>`, `--user`): efficiency, peak memory, flags and a
-suggested next request. For GPUs, sample `nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv -l 10`.
-Raw fields, the ledger and the receipt: `references/sizing.md`.
+`scripts/jobeff <ids>` (`--lsf-log logs/*.out`, `--user`): efficiency, peak memory, flags and a suggested next
+request. For GPUs, sample `nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv -l 10`. Raw fields, the
+ledger and the receipt: `references/sizing.md`.
 
 - **Memory**: `-M` about 1.3 x the measured peak (cgroup RSS, not page cache), rounded up to the next 500 MB.
   With no measurement yet, say so and start modest. After a memory kill, find what grew instead of raising `-M` again.
@@ -178,9 +178,9 @@ concluding a file is missing. Over ssh (`ssh host 'tar -c ...' > file`), stdout 
 
 ## Recover
 
-- **Why pending**: `bjobs -p -l <id>` (SLURM `squeue -j <id> -o %R`). Usual causes: a request bigger than free
-  hosts have, a GPU-memory filter only the largest GPUs meet, a stale host selector, fairshare. Diagnose
-  "Affinity ... not enough processor units" with `references/lsf.md` before cutting cores.
+- **Why pending**: `bjobs -p -l <id>`. Usual causes: a request bigger than free hosts have, a GPU-memory filter only
+  the largest GPUs meet, a stale host selector, fairshare. Diagnose "Affinity ... not enough processor units" with
+  `references/lsf.md` before cutting cores.
 - **Kill** only the exact confirmed id, with the user's reason (releasing your own idle allocation is one). No
   pattern kills, no `bkill -r`, no kill lines in reusable scripts. Check the reply: with an expired login a kill
   can fail silently. Check a conditional approval ("stop it if progress is saved") before killing.

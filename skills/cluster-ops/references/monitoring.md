@@ -35,9 +35,6 @@ while :; do
 done
 ```
 
-SLURM has the same shape: query `sacct -n -X -P -j "$J" -o State`, treat COMPLETED, FAILED, CANCELLED, TIMEOUT,
-OUT_OF_MEMORY and NODE_FAIL as terminal, RUNNING and PENDING as above, and an empty reply as an error.
-
 What the output means:
 
 - `DONE`, `EXIT` or `GONE` (a confirmed "is not found": finished and purged): read `status.json`, the log and
@@ -81,7 +78,7 @@ purged job may need `bhist -n 10 -l <id>` on LSF) and re-arms a wait for each.
 
 A terminal scheduler state is news, not a verdict. Check, in order:
 
-1. Exit code and reason (`bjobs -l`, `bacct -l`, `sacct`).
+1. Exit code and reason (`bjobs -l`, `bacct -l`).
 2. The last 50 lines of the log and the whole `.err` file. Search for silent fallbacks: warnings, "falling
    back", "retrying on CPU", "skipped".
 3. Output invariants: file exists, expected row or file count, checksum matches the receipt, the parser

@@ -1,11 +1,11 @@
 # hpcstack
 
-Agent skills for shared clusters: faster, cheaper, and fairer to everyone else in the queue.
+Agent skills for shared LSF clusters: faster, cheaper, and fairer to everyone else in the queue.
 
-These skills teach a coding agent (Claude Code, Codex, or anything that reads `SKILL.md`) to work on a shared
-batch cluster the way a careful colleague would. Jobs ask for what they use, measure before they optimise, clean
-up after themselves, and stop when their budget is spent. LSF is the primary scheduler, with SLURM equivalents.
-The rules come from real jobs on a large LSF cluster.
+These skills teach a coding agent (Claude Code, Codex, or anything that reads `SKILL.md`) to work on a shared batch
+cluster the way a careful colleague would. Jobs ask for what they use, measure before they optimise, clean up after
+themselves, and stop when their budget is spent. They were written and tested on the Wellcome Sanger Institute's
+farm22, and the rules come from real jobs there.
 
 ## Skills
 
@@ -50,12 +50,12 @@ Without a profile, the skills run a short read-only discovery and ask you to con
 ## Status
 
 Version 0.2. Tested on real LSF jobs: `hpc-session` (CPU and GPU queues, including a busy GPU with idle CPU),
-`jobeff`, `quota_report.sh`, and `queue_worker.py` (failing, timed-out and crashing tasks, `preempt`, idle exit,
-STOP, `bkill`, `bkill -s USR2`, one worker per scenario). Tested only with fake commands or synthetic inputs:
-`hpc-probe`, `pendlog`, `pend-risk`, `listing_job.sh`, `analyse_listing.py`, `results_tsv.py`, `plot_progress.py`,
-and in `queue_worker.py` the resume on the next worker, the USR2 grace and the `--est-min` fit check. Not yet tested:
-several workers sharing one queue, and every SLURM path. Reports of what breaks on your cluster are the most useful
-issues you can open.
+`hpc-probe` (a real `bsub -Is` on a CPU queue), `jobeff`, `quota_report.sh`, and `queue_worker.py` (failing,
+timed-out and crashing tasks, `preempt`, idle exit, STOP, `bkill`, `bkill -s USR2`, one worker per scenario). Tested
+only with fake commands or synthetic inputs: `pendlog`, `pend-risk`, `listing_job.sh`, `analyse_listing.py`,
+`results_tsv.py`, `plot_progress.py`, and in `queue_worker.py` the resume on the next worker, the USR2 grace and the
+`--est-min` fit check. Not yet tested: several workers sharing one queue. Reports of what breaks on your cluster are
+the most useful issues you can open.
 
 ## Contributing
 

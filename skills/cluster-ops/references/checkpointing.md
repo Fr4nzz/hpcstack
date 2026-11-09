@@ -4,8 +4,8 @@ A job that saves only at the end loses everything to a walltime kill, a memory k
 
 - **Save often, publish rarely.** Write checkpoints every N minutes or epochs to node-local disk. Publish only
   `last` and `best` to shared storage, each replaced by atomic `mv`, with a small receipt (step, metric, SHA-256).
-- **Trap the warning.** Submit with `-wa USR2 -wt 10` (SLURM `--signal=B:USR2@600`). The trap publishes `last`,
-  the log and a final status, then exits.
+- **Trap the warning.** Submit with `-wa USR2 -wt 10`. The trap publishes `last`, the log and a final status, then
+  exits.
 - **Write atomically**: `x.tmp`, then `mv x.tmp x`. A restart treats any `.tmp` as absent. File existence is not
   completion: check the receipt hash and expected shape.
 - **Resume into a new attempt folder** (`attempt2/`) from the previous `last`. Keep the evidence of a failed attempt.

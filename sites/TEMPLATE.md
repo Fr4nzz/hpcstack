@@ -11,13 +11,13 @@ Re-verify anything dated more than 30 days ago before relying on it.
 
 ## Scheduler
 
-- Scheduler and version family: `<LSF 10 / SLURM 23.x>` (check: `lsid` / `sinfo -V`)
-- Memory request semantics: `<per job / per core / per node>` (LSF: `LSB_JOB_MEMLIMIT`, `LSF_UNIT_FOR_LIMITS`)
+- LSF version family: `<LSF 10>` (check: `lsid`)
+- Memory request semantics: `<per job / per core>` (check: `LSB_JOB_MEMLIMIT`, `LSF_UNIT_FOR_LIMITS`)
 - Can users extend the walltime of a running job? `<yes, bmod -W, up to the queue limit / no>`
 - Default memory when none is requested: `<value>` (check: `bqueues -l <queue>`). Always pass memory anyway.
 - Job exceptions or idle detection: `<which queues, notify only?>`
 
-## Queues or partitions
+## Queues
 
 | Queue | Use for | Run limit (check with) | Notes |
 |---|---|---|---|
@@ -28,9 +28,9 @@ Re-verify anything dated more than 30 days ago before relying on it.
 
 ## GPUs
 
-- Request syntax: `<-gpu "num=1" / --gres=gpu:1>`
+- Request syntax: `<-gpu "num=1">`
 - Shared or exclusive mode: `<default, how to request>`
-- How to list GPU hosts: `<bhosts -gpu / sinfo -o "%N %G">`
+- How to list GPU hosts: `<bhosts -gpu>`
 
 ## Storage
 
