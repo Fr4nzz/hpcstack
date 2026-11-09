@@ -1,4 +1,4 @@
 interface:
   display_name: "Optimize Pipeline"
-  short_description: "Measured speed-up with verified output"
+  short_description: "Faster, lighter compute steps with verified output"
   default_prompt: "Use $optimize-pipeline to make this step faster and lighter with verified output."

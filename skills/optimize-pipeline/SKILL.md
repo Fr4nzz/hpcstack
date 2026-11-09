@@ -1,6 +1,6 @@
 ---
 name: optimize-pipeline
-description: Make a slow, memory-hungry or expensive compute step faster and lighter, with output identical or within a pre-registered equivalence test. Use when a cluster job or long local run (training, alignment, variant calling, image processing, inference, ETL) is too slow ("make this faster", "why is this so slow?"), needs too much memory, got OOM-killed or underuses the GPU, or before running the same recipe many times.
+description: Make a slow or memory-hungry compute step faster and lighter, with proof that the output did not change. Use when the user says "make this faster", "why is this so slow?", "it needs too much memory", "the GPU is barely used" or "speed up this training", or before running the same recipe many times.
 ---
 
 # Optimize a pipeline
@@ -8,12 +8,12 @@ description: Make a slow, memory-hungry or expensive compute step faster and lig
 Goal: a measured speed-up or memory cut, with proof that the output did not change (or a pre-registered
 test showing it changed acceptably), shipped as the new default.
 
-Skip this for a one-off 30-minute run. Just check thread counts (**Threads per process** below) and move on.
+For a one-off 30-minute run, only check thread counts (**Threads per process** below).
 
 ## Budget and stop rule
 
 State a budget before starting (for example, "4 GPU-hours of probes and one working day"). Stop when the
-target is met, the budget is spent, or the measured ceiling says there is nothing left to win.
+target is met, the budget is spent, or the measured ceiling leaves nothing to win.
 Ask the user before any change of class D or any recipe change.
 
 ## Workflow
@@ -34,8 +34,8 @@ Ask the user before any change of class D or any recipe change.
      `OMP_NUM_THREADS=1` (and `OPENBLAS_`, `MKL_`) per worker, and call `cv2.setNumThreads(0)` in each worker,
      because OpenCV ignores these variables. Check that a tool's threads flag matches the cores it uses.
    - **The ceiling**: the same work with I/O removed (data held in memory, one GPU batch repeated). The gap
-     between the ceiling and the real rate is all that I/O or loader work can win. No gap, stop there.
-   - **Wait versus compute** per step or per item. GPU busy % (`nvidia-smi -l 10`). Cores busy.
+     between the ceiling and the real rate is all that I/O or loader work can win. With no gap, stop.
+   - **Wait versus compute** per step or per item, GPU busy % (`nvidia-smi -l 10`), cores busy.
    - **Per-stage CPU profile** (`py-spy`, `cProfile` on a few hundred items). For a data loader, profile one
      worker in a single process. Rank stages by time: the usual suspects are often not the cause.
    - **I/O pattern**: many small files, metadata calls, compression level, a single `gzip` at the end of a
@@ -50,8 +50,8 @@ Ask the user before any change of class D or any recipe change.
      chunking, prefetch depth, allocator settings. Verify by identity: `cmp`, `md5sum` of sorted output,
      `samtools view | md5sum`, `np.array_equal` on a few thousand items. For training, also check that the loss
      at a fixed iteration of a short run is identical. Keep if it saves at least 5 % time or 10 % memory.
-   - **W, scheduling-like**: fewer workers, a different item-to-worker assignment, nondeterministic order.
-     Equivalent to a new seed. Verify the output is equivalent up to order or seed noise.
+   - **W, scheduling-like**: fewer workers, a different item-to-worker assignment, nondeterministic order. Like a
+     new seed: verify the output is equivalent up to order or seed noise.
    - **D, distribution-changing**: mixed precision, lossy compression, resized inputs, a different
      algorithm. Keep only with a large gain (at least 15 % time or 25 % memory) AND a pre-registered
      equivalence test that passes (for example, metric within max(2 x seed spread, a fixed floor)).
@@ -65,16 +65,16 @@ Ask the user before any change of class D or any recipe change.
 
 Bad: "Data loading looks slow. I rewrote it to use GPU augmentation." (No baseline, no class, no proof.)
 
-Good: "Real 1.09 s/step, well above the GPU ceiling. Workers ran 16 or more BLAS threads each. Set them to 1 (class E,
-first 2,000 samples identical): 0.67 s/step. Profiling one worker showed 60 % in a computation that is
-always zero for this data. Skipped it (class E, identical). With a vectorised loop (E) and fewer workers (W): 0.57 s/step
-on 6 cores instead of 16. Gap to ceiling now small. Stop."
+Good: "Real 1.09 s/step, well above the GPU ceiling. Workers ran 16 or more BLAS threads each. Set them to 1
+(class E, first 2,000 samples identical): 0.67 s/step. Profiling one worker showed 60 % in a computation that is
+always zero for this data. Skipped it (class E, identical). With a vectorised loop (E) and fewer workers (W):
+0.57 s/step on 6 cores instead of 16. Gap to ceiling now small. Stop."
 
 ## Hygiene
 
 - Kill orphans between measurements. Run each probe in its own session (`setsid`) and `pkill -s <sid>`.
-  Workers of a killed parent keep running, hold GPU memory and pollute the next measurement. They can look
-  like another user's job.
+  Workers of a killed parent keep running, hold GPU memory, pollute the next measurement and can look like
+  another user's job.
 - Don't over-test exact changes. If every kept change is class E or W, the normal seeds of the real run
   already measure the remaining noise.
 - Record versions. A library upgrade mid-study invalidates the baseline.

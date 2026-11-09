@@ -1,6 +1,6 @@
 ---
 name: cluster-autoresearch
-description: Run an autonomous, budgeted experiment loop on a shared cluster. Use when the user says "run experiments overnight", "autoresearch", "try ideas until it improves", "sweep this", "keep going while I'm away", or wants many model, parameter or pipeline variants tested against a fixed metric.
+description: Run a budgeted keep-or-discard experiment loop on a shared cluster. Use when the user says "run experiments overnight", "autoresearch", "try ideas until it improves", "sweep this" or "keep going while I'm away", or wants many variants tested against one fixed metric.
 ---
 
 # Cluster autoresearch
@@ -13,11 +13,11 @@ budget and a stop rule, and each wave (one batch of experiments run together) is
 
 ## Before the first wave: agree the plan
 
-Write `program.md` from `references/program-template.md`. If the user's approval already covers its metric,
-editable file and budget, start. Otherwise ask for the parts it leaves open. It fixes:
+Write `program.md` from `references/program-template.md`. Start once the user's approval covers its metric,
+editable file and budget, and ask for any part it leaves open. It fixes:
 
 - **Metric and data split.** One primary metric. A development split for decisions. Locked test sets are
-  opened only by an explicit, logged `confirm` step that the user approves.
+  opened only by a logged `confirm` step that the user approves.
 - **Fixed files**, SHA-256 pinned: evaluation, data access, the keep rule. **One editable file** (the model,
   config or pipeline step). If a pinned hash changes, stop and report.
 - **Keep rule**: gain > max(2 x seed spread, a floor), measured over the same seeds as the incumbent, plus
@@ -86,17 +86,17 @@ scripts/queue_worker.py preempt --queue q/ --task w04_full --reason "ablation de
 
 - Long trainings that may be displaced go in as worker tasks with a `--resume-cmd`, not as bare batch jobs.
 - Preempt only with a recorded reason that the new work is worth more.
-- Add the high task BEFORE you preempt. With several workers it may run on a different worker.
+- Add the high task **before** you preempt. With several workers it may run on a different worker.
 - Within about 10 s of `preempt` the worker sends the task's process group `--preempt-signal` (default TERM),
   waits up to `--preempt-grace` (120 s, capped by the time left), then KILLs it. The task is recorded as
-  `preempted` and re-queued at its own priority with its `--resume-cmd`. With one worker, the
-  queued high task runs next in the same allocation.
+  `preempted` and re-queued at its own priority with its `--resume-cmd`. With one worker, the queued high task
+  runs next in the same allocation.
 - The preempted run loses the work since its last checkpoint. Without `--resume-cmd` it restarts from scratch.
 - A task is preempted at most twice. `preempt` prints the worker's time left and warns when a high task's
   `--est-min` does not fit. `bkill` or USR2 on the worker still stops everything.
-- Fair use: your own queue and jobs only, no idle allocations held, the idle exit stays on. Reuse an
-  allocation only for work that its queue, resource request and site policy allow. Never extend or renew
-  an allocation, or keep it busy, just to keep the slot.
+- Use only your own queue and jobs, hold no idle allocations, and keep the idle exit on. Reuse an allocation only
+  for work that its queue, resource request and site policy allow. Never extend or renew an allocation, or keep
+  it busy, just to keep the slot.
 
 ## Attribution
 
@@ -107,9 +107,9 @@ turned out to be "a fine-tuned model was better": smaller frozen encoders on the
 ## Fair use
 
 - Waves of 8 to 12 jobs, an array cap, shared GPUs unless exclusive is measured to be needed.
-- State GPU-hours before each wave. Three or more GPUs at once needs a reason in `FINDINGS.md`.
-- Cheap proxy runs (fewer epochs, a data slice) screen ideas only if the proxy has been shown to rank them the
-  same way as full runs.
+- State GPU-hours before each wave. Three or more GPUs at once need a reason in `FINDINGS.md`.
+- Cheap proxy runs (fewer epochs, a data slice) screen ideas only once the proxy is shown to rank them as full
+  runs do.
 
 ## Done means
 
