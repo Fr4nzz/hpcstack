@@ -28,29 +28,29 @@ sessions one at a time, after checking that each is an idle shell.
 - Anything that runs longer than you are sure to be watching, or can be scripted, is a batch job or a worker-queue
   task (`cluster-autoresearch`). Batch jobs end on their own when the agent stops.
 - Interactive is for probes, first-run debugging and commands that have no script yet. It always runs under
-  `scripts/hpc-session` with a short walltime. An interactive allocation without both is a bug.
+  `scripts/hpc-session` with a short walltime, driven by `scripts/hpc-probe`. An allocation without all three is a
+  bug.
 - Local GPU or cluster: for a GPU step over about 15 min, compare the recent PEND for the request plus cluster
   runtime and upload with the local GPU's measured time. Take the faster and say why.
 
 ```bash
-S=probe-$(date +%m%d-%H%M%S); echo "$S"   # login node, run folder. A fresh name, reused in every later call
-tmux new -d -s "$S" -x 250 'bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00 \
-  -wa USR2 -wt 10 /path/to/cluster-ops/scripts/hpc-session; echo "__ALLOC_ENDED_$?"; sleep 600' || exit 1
+P=/path/to/cluster-ops/scripts/hpc-probe   # login node, run folder. SLURM: srun --time=... --pty instead
+$P start probe-<task> -- bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00 \
+   -wa USR2 -wt 10 /path/to/cluster-ops/scripts/hpc-session
+$P run probe-<task> -- 'python check.py --quick'   # one command, at most 540 s, returns its exit code
+$P stop probe-<task>
 ```
 
-- tmux runs `bsub` itself, with no login shell under it, and refuses a name in use (SLURM: `srun ... --pty
-  .../hpc-session-slurm`). Send no work until `echo "__READY_${LSB_JOBID:-none}_$(hostname)"` prints a job id and
-  a compute host. End each command with its own numbered marker (`; echo "__END_3_$?"`), wait in one bounded
-  call for that whole line or `__ALLOC_ENDED_` in `tmux capture-pane`, then read the log. Steps and settings:
+- `start` refuses a used name and returns once a job id and a compute host answer. No login shell sits under the
+  session. `run` exits with the command's code, 124 on a timeout, 125 if the allocation is gone. Details:
   `references/interactive.md`.
 - `-W 2:00` is the hard backstop. Many sites refuse to extend a running job, so choose it up front.
 - `hpc-session` releases the job once nobody types and the job's CPU and GPUs are idle. A training inside it keeps
   the job alive.
 - Ask for what the probe needs (1 GPU, a few cores, measured memory). CPU-only work goes to a CPU queue. Record
-  the job id, tmux session and purpose where the user can see them (to watch: `tmux attach -r -t <session>`).
-- End in this order: `exit` the shell, confirm with `bjobs`/`squeue` that the job is gone (if it still runs after
-  30 s, kill that exact id and poll until DONE or EXIT), and only then `tmux kill-session -t "=$S"`. Closing tmux
-  does not reliably end the job.
+  the job id, probe name and purpose where the user can see them (`$P attach` prints a read-only watch command).
+- `stop` exits the shell, confirms with `bjobs`/`squeue` that the job is gone (killing that exact id if needed),
+  and only then closes the session. If the job stays listed, it keeps the session: keep monitoring and report.
 
 ## Size the request
 

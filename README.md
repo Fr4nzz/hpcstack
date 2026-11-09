@@ -52,10 +52,10 @@ Without a profile, the skills run a short read-only discovery and ask you to con
 Version 0.2. Tested on real LSF jobs: `hpc-session` (CPU and GPU queues, including a busy GPU with idle CPU),
 `jobeff`, `quota_report.sh`, and `queue_worker.py` (failing, timed-out and crashing tasks, `preempt`, idle exit,
 STOP, `bkill`, `bkill -s USR2`, one worker per scenario). Tested only with fake commands or synthetic inputs:
-`pendlog`, `pend-risk`, `listing_job.sh`, `analyse_listing.py`, `results_tsv.py`, `plot_progress.py`, and in
-`queue_worker.py` the resume on the next worker, the USR2 grace and the `--est-min` fit check. Not yet tested:
-several workers sharing one queue, and every SLURM path. Reports of what breaks on your cluster are the most
-useful issues you can open.
+`hpc-probe`, `pendlog`, `pend-risk`, `listing_job.sh`, `analyse_listing.py`, `results_tsv.py`, `plot_progress.py`,
+and in `queue_worker.py` the resume on the next worker, the USR2 grace and the `--est-min` fit check. Not yet tested:
+several workers sharing one queue, and every SLURM path. Reports of what breaks on your cluster are the most useful
+issues you can open.
 
 ## Contributing
 
