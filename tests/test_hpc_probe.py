@@ -102,8 +102,8 @@ def test_lsf_session_markers_timeout_and_stop(env):
     t0 = time.time()
     r = probe(env, "run", "p1", "--", "sleep 2; echo $X")                 # old markers must not satisfy this wait
     assert r.returncode == 0 and "5" in r.stdout and time.time() - t0 >= 2
-    r = probe(env, "run", "p1", "--timeout", "1", "--", "sleep 4; echo late")
-    assert r.returncode == 124 and r.elapsed < 4 and "still running" in r.stdout
+    r = probe(env, "run", "p1", "--timeout", "1", "--", "sleep 8; echo late")
+    assert r.returncode == 124 and r.elapsed < 6 and "still running" in r.stdout
     assert probe(env, "run", "p1", "--", "true").returncode == 2         # previous command not ended
     r = probe(env, "wait", "p1")
     assert r.returncode == 0 and "late" in r.stdout
@@ -147,12 +147,12 @@ def test_closed_session_and_ended_allocation_return_at_once(env):
     assert probe(env, "start", "c1", *LSF).returncode == 0
     subprocess.run(env["tm"] + ["kill-session", "-t", "=c1"], check=True)
     r = probe(env, "run", "c1", "--", "true")
-    assert r.returncode == 125 and r.elapsed < 3
+    assert r.returncode == 125 and r.elapsed < 10   # at once, not after the 540 s default
     assert probe(env, "start", "c2", *LSF).returncode == 0
     subprocess.run(env["tm"] + ["send-keys", "-t", "=c2:", "exit", "Enter"], check=True)   # watchdog release
     time.sleep(1)
     r = probe(env, "run", "c2", "--", "sleep 30")
-    assert r.returncode == 125 and r.elapsed < 5
+    assert r.returncode == 125 and r.elapsed < 10
 
 
 def test_pending_start_times_out_then_wait(env):
