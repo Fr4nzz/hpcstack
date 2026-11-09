@@ -52,12 +52,14 @@ tail -20 probe-3.log
 - The session runs `bsub` with no login shell under it. Keys sent while the job pends, after a rejected
   submission, or after the job ends (watchdog release, walltime, `exit`) reach no shell on the login node.
 - Send work only after the `__READY_` line shows a numeric job id and a host other than the login node. SLURM
-  prints no `<<Starting on`, so send the readiness line once `srun` reports the allocation and match `SLURM_JOB_ID`.
+  prints no `<<Starting on`: skip that wait, echo `$SLURM_JOB_ID` instead of `$LSB_JOBID`, and give the readiness
+  wait the longer timeout.
 - Number each marker anew, because the pane still holds the earlier ones. `grep -x` matches only a whole output
   line, never the typed line with its literal `$?`. On a nonzero code, read the log before sending anything else.
 - Every wait is one bounded call that also stops on `__ALLOC_ENDED_`. After that, the allocation is gone: start a
   new session with a new name.
-- `-t "=$S:"` targets that exact session. A bare `-t probe` also matches a longer name such as `probe-other`.
+- `-t "=$S:"` targets that exact session. A bare `-t probe` also resolves to another session such as
+  `probe-other`.
 - The pane holds only recent lines (`-S -200` reads 200 back). Send long output to a log file in the run folder,
   which the login node can read. `tmux send-keys -t "=$S:" C-c` interrupts a command that hangs.
 - A person can watch with `tmux attach -r -t <session>` (`-r` keeps it read-only, `Ctrl-b d` detaches).
@@ -81,7 +83,8 @@ Good: `hpc-session` with `-W 2:00`. The agent stops, and the watchdog releases t
   Checked: a second `tmux new` with the same name fails, the readiness line names the job, the wait for
   `__END_4_` lasts for the 3 s command although `__END_3_3` is still on screen, and after a rejection the wait
   ends on `__ALLOC_ENDED_255` and keys typed ahead run nowhere. A longer manual run also checked that `=name:`
-  resolves only the exact session and that keys sent after `exit` run nowhere.
+  resolves only the exact session (a bare `-t probe` resolved to `probe-other`) and that keys sent after `exit`
+  run nowhere.
 - Not yet run with real `bsub -Is` or `srun --pty`: the `<<Starting on` text, whether `bsub` passes on keys typed
   while pending, and the SLURM readiness step are unchecked.
 - Not yet tested: `hpc-session-slurm`, several GPUs in one job, another tenant on the same GPU, and the
