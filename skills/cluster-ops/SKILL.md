@@ -1,6 +1,6 @@
 ---
 name: cluster-ops
-description: Submit, size, monitor and clean up jobs on a shared LSF or SLURM cluster. Use when the user says "run this on the cluster", "submit a job", "why is my job pending?", "check my jobs", "how much memory should I ask for?", "why was my job killed?", "give me a GPU shell", "we're over quota", "what can I delete?" or "run this nf-core pipeline", and before you ssh to a login node or write a job script.
+description: Submit, size and monitor jobs on a shared LSF or SLURM cluster, and clean up its storage. Use when the user says "run this on the cluster", "submit a job", "why is my job pending?", "check my jobs", "how much memory should I ask for?", "why was my job killed?", "give me a GPU shell", "we're over quota", "what can I delete?" or "run this nf-core pipeline", or pastes a `bsub` or `sbatch` command, and before you ssh to a login node, write a job script or open an interactive allocation.
 ---
 
 # Cluster operations

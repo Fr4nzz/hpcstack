@@ -1,6 +1,6 @@
 ---
 name: optimize-pipeline
-description: Make a slow or memory-hungry compute step faster and lighter, with proof that the output did not change. Use when the user says "make this faster", "why is this so slow?", "it needs too much memory", "the GPU is barely used" or "speed up this training", or before running the same recipe many times.
+description: Make a slow or memory-hungry compute step faster and lighter, with proof that the output is unchanged or passes a pre-registered equivalence test. Use when the user says "make this faster", "why is this so slow?", "it needs too much memory", "the GPU is barely used" or "speed up this training", or before running the same recipe many times.
 ---
 
 # Optimize a pipeline
