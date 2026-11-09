@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Job script template for LSF or SLURM. Copy it, then edit the WORK section.
+# Job script template for LSF. Copy it, then edit the WORK section.
 #
-# Submit (LSF):   bsub -J myjob -q <queue> -n 4 -M 8000 -R "select[mem>=8000] rusage[mem=8000] span[hosts=1]" \
-#                      -W 4:00 -o logs/%J.out -e logs/%J.err -wa USR2 -wt 10 bash job.sh <out_dir>
-# Submit (SLURM): sbatch --cpus-per-task=4 --mem=8G --time=04:00:00 --signal=B:USR2@600 \
-#                      --output=logs/%j.out job.sh <out_dir>
+# Submit: bsub -J myjob -q <queue> -n 4 -M 8000 -R "select[mem>=8000] rusage[mem=8000] span[hosts=1]" \
+#              -W 4:00 -o logs/%J.out -e logs/%J.err -wa USR2 -wt 10 bash job.sh <out_dir>
 #
 # Replace this file on the cluster by writing a new copy and `mv` over it. Never edit it while jobs run it.
 
@@ -17,8 +15,8 @@ PY=${PY:-python3}                          # prefer an absolute interpreter, e.g
 set -Eeuo pipefail
 
 OUT_DIR=${1:?usage: job.sh <out_dir>}
-JOBID=${LSB_JOBID:-${SLURM_JOB_ID:-manual$$}}
-NCPU=${LSB_DJOB_NUMPROC:-${SLURM_CPUS_PER_TASK:-1}}
+JOBID=${LSB_JOBID:-manual$$}
+NCPU=${LSB_DJOB_NUMPROC:-1}
 export OMP_NUM_THREADS=$NCPU OPENBLAS_NUM_THREADS=$NCPU MKL_NUM_THREADS=$NCPU
 # Data-loader trainings: set these to 1 inside each worker instead (see optimize-pipeline).
 

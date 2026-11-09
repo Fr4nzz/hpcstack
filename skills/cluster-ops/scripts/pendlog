@@ -2,7 +2,6 @@
 """pendlog: log queue snapshots and your own PEND times, so wait risk can be judged from data later.
 
 UNTESTED on a real cluster: tested only with fake bqueues/bhosts/bjobs/bhist/bsub (tests/test_pendlog.py).
-LSF first. SLURM paths (squeue, sinfo, sshare, sacct, sbatch) are thinner and untested.
 
 Usage:
   pendlog snapshot --queue Q [--hosts-from-request "<bsub -R/-gpu/-n args>"] --out DIR
@@ -15,15 +14,15 @@ snapshot  Runs light commands only, each with a timeout (--timeout, default 20 s
           PEND counts from `bjobs -u $USER`, and your fairshare line from `bqueues -r Q`. Appends one JSON
           line to DIR/snapshots.jsonl. It never fails: errors go into the line's "errors" list, exit 0.
 submit    Takes a snapshot (or reuses one under 60 s old for the same queue and shape, and spends at most
-          about 10 s on it), runs the bsub (or sbatch) command, records the job id and the full request in
+          about 10 s on it), runs the bsub command, records the job id and the full request in
           DIR/jobs.jsonl, and exits with the command's exit code (128 + N if killed by signal N). Its
           stdout and stderr pass through byte for byte as they arrive. Options are read from the command
           line only. With --stdin-script, stdin is read, its #BSUB lines are parsed too, and it is passed on
           to bsub (for `pendlog submit --stdin-script -- bsub < job.sh`).
           Interactive or blocking submits (bsub -I, -Is, -Ip, -IX, -IS, -ISp, -ISs, -K among the options
-          before the command, and srun or salloc) are logged first, without a job id, then pendlog replaces
+          before the command) are logged first, without a job id, then pendlog replaces
           itself with the command (exec), so the terminal belongs to the job. `started` cannot follow them.
-          --stdin-script with -I* (or srun, salloc) exits 2, because those jobs need the terminal.
+          --stdin-script with -I* exits 2, because those jobs need the terminal.
           --stdin-script with -K pipes the script as usual; Ctrl-C waits for bsub, logs rc 130, exits 130.
 started   For logged jobs with no start yet (submitted in the last --since hours, default 72), reads the
           state, start time, PEND seconds and pending reason with one
@@ -105,49 +104,41 @@ BSUB_WITH_VAL = set("""
     -pack -alloc_flags -csm -smt -stage -network -nnodes -freq -ptl -rnc -eptl -clusters -wa -wt -Q -p
     -notify -jobaff -rcacct -ln_slots -ln_mem -datachk -datagrp
 """.split())
-SLURM_SUBMIT = ("sbatch", "srun", "salloc")
-SLURM_WITH_VAL = {"-A", "-a", "-b", "-c", "-C", "-d", "-D", "-e", "-G", "-i", "-J", "-L", "-M", "-m", "-n", "-N",
-                  "-o", "-p", "-q", "-S", "-t", "-w", "-x", "--partition", "--cpus-per-task", "--mem", "--gres",
-                  "--gpus", "--time", "--account", "--job-name", "--output", "--error"}
 
 
 def parse_request(args):
-    """bsub (or sbatch) arguments -> request dict. Unknown options are ignored."""
+    """bsub arguments -> request dict. Unknown options are ignored."""
     args = list(args)
-    slurm = bool(args) and os.path.basename(args[0]) in SLURM_SUBMIT
-    if args and os.path.basename(args[0]) in ("bsub",) + SLURM_SUBMIT:
+    if args and os.path.basename(args[0]) == "bsub":
         args = args[1:]
     r = {"queue": None, "cores": None, "mem_mb": None, "gpu_num": None, "gmem_gb": None, "gmodel": "",
          "j_exclusive": False, "pin": False, "host_incl": [], "host_excl": [], "array_size": 1,
          "runlimit": None, "resreq": [], "flags": []}
-    with_val = SLURM_WITH_VAL if slurm else BSUB_WITH_VAL
     i = 0
     while i < len(args):
         a = args[i]
         val = None
-        if "=" in a and a.startswith("--"):
-            a, val = a.split("=", 1)
-        elif a in with_val and i + 1 < len(args):
+        if a in BSUB_WITH_VAL and i + 1 < len(args):
             val = args[i + 1]
             i += 1
         elif not a.startswith("-"):
             break  # the command starts here
         else:
             r["flags"].append(a)  # an option without a value, before the command
-        if (a == "-q" and not slurm) or (a in ("-p", "--partition") and slurm):
+        if a == "-q":
             r["queue"] = val
-        elif (a == "-n" and not slurm) or (a in ("-c", "--cpus-per-task") and slurm):
+        elif a == "-n":
             try:
                 r["cores"] = int(str(val).split(",")[-1])
             except ValueError:
                 pass
-        elif (a == "-M" and not slurm) or a == "--mem":
+        elif a == "-M":
             r["mem_mb"] = mem_mb(val)
-        elif (a == "-W" and not slurm) or (a in ("-t", "--time") and slurm):
+        elif a == "-W":
             r["runlimit"] = val
-        elif a == "-m" and not slurm:
+        elif a == "-m":
             r["host_incl"] += str(val).split()
-        elif a == "-J" and not slurm:
+        elif a == "-J":
             m = re.search(r"\[(.*?)\]", str(val))
             if m:
                 n = 0
@@ -177,11 +168,6 @@ def parse_request(args):
             r["gmem_gb"] = round(gm / 1024, 2) if gm else None
             r["gmodel"] = g.get("gmodel", "")
             r["j_exclusive"] = g.get("j_exclusive", "").lower() == "yes"
-        elif a in ("--gres", "--gpus"):
-            m = re.search(r"gpu(?::([\w-]+))?(?::(\d+))?", str(val)) if a == "--gres" else None
-            r["gpu_num"] = int(m.group(2) or 1) if m else (int(val) if str(val).isdigit() else 1)
-            if m and m.group(1) and not m.group(1).isdigit():
-                r["gmodel"] = m.group(1)
         i += 1
     r["pin"] = bool(r["gmodel"] and r["gmodel"].upper() != "NVIDIA") or bool(r["host_incl"])
     return r
@@ -219,11 +205,7 @@ def run(cmd, timeout=None, errors=None):
 
 
 def scheduler():
-    if shutil.which("bqueues") or shutil.which("bjobs"):
-        return "lsf"
-    if shutil.which("squeue"):
-        return "slurm"
-    return "none"
+    return "lsf" if shutil.which("bqueues") or shutil.which("bjobs") else "none"
 
 
 def table(text):
@@ -337,28 +319,6 @@ def snapshot_lsf(queue, req, errors, user):
     return s
 
 
-def snapshot_slurm(queue, req, errors, user):
-    s = {}
-    pd_ = run(["squeue", "-h", "-p", queue, "-t", "PD", "-o", "%i"], errors=errors)
-    rn = run(["squeue", "-h", "-p", queue, "-t", "R", "-o", "%i"], errors=errors)
-    s["queue_pend"] = len(pd_.splitlines()) if pd_ is not None else None
-    s["queue_run"] = len(rn.splitlines()) if rn is not None else None
-    own = run(["squeue", "-h", "-u", user, "-o", "%T %P"], errors=errors) or ""
-    rows = [ln.split() for ln in own.splitlines() if len(ln.split()) >= 2]
-    s["own_run_q"] = sum(1 for st, p in rows if st == "RUNNING" and p == queue)
-    s["own_pend_q"] = sum(1 for st, p in rows if st == "PENDING" and p == queue)
-    s["own_run_all"] = sum(1 for st, _ in rows if st == "RUNNING")
-    s["own_pend_all"] = sum(1 for st, _ in rows if st == "PENDING")
-    nodes = run(["sinfo", "-h", "-p", queue, "-o", "%t %D"], errors=errors) or ""
-    s["node_states"] = {p[0]: to_int(p[1]) for p in (ln.split() for ln in nodes.splitlines()) if len(p) == 2}
-    fs = run(["sshare", "-h", "-P", "-U", "-u", user, "-o", "Account,User,FairShare"], errors=errors) or ""
-    for ln in fs.splitlines():
-        p = ln.split("|")
-        if len(p) == 3 and p[1] == user:
-            s["fairshare_priority"] = p[2]
-    return s
-
-
 def take_snapshot(queue, req, out_dir, job_id=None):
     """Never raises. Returns the snapshot dict and appends it to out_dir/snapshots.jsonl."""
     errors = []
@@ -374,8 +334,6 @@ def take_snapshot(queue, req, out_dir, job_id=None):
             errors.append("no queue given")
         elif sched == "lsf":
             snap.update(snapshot_lsf(queue, req, errors, user))
-        elif sched == "slurm":
-            snap.update(snapshot_slurm(queue, req, errors, user))
         else:
             errors.append("no scheduler commands on PATH")
     except Exception as e:  # never fail the caller
@@ -455,15 +413,12 @@ def tee(src, dst, buf):
 
 
 def job_id_from(out):
-    m = (re.search(r"Job <(\d+)>", out) or re.search(r"Submitted batch job (\d+)", out)
-         or re.match(r"^\s*(\d+)(?:;\S+)?\s*$", out))  # sbatch --parsable
+    m = re.search(r"Job <(\d+)>", out)
     return m.group(1) if m else None
 
 
 def is_interactive(cmd, req, flags=INTERACTIVE_FLAGS):
     """Interactive or blocking submit? Only scheduler options before the command count, not the payload."""
-    if os.path.basename(cmd[0]) in ("srun", "salloc"):
-        return True
     if os.path.basename(cmd[0]) != "bsub":
         return False
     if "flags" not in req:  # parse failed: scan the option prefix for the flags themselves
@@ -500,7 +455,7 @@ def cmd_submit(a):
     except Exception as e:
         req = {"parse_error": str(e)}
     if stdin_bytes is not None and is_interactive(cmd, req, PTY_FLAGS):
-        print("pendlog submit: an interactive job (-I*, srun, salloc) needs the terminal, so --stdin-script "
+        print("pendlog submit: an interactive job (-I*) needs the terminal, so --stdin-script "
               "can't be used. Put the options on the command line: pendlog submit --out DIR -- bsub -Is ...",
               file=sys.stderr)
         return 2
@@ -631,30 +586,6 @@ def lsf_bhist(job_id, errors):
             "pend_s": pend, "pend_reason": "", "start_time_raw": "", "source": "bhist"}, True
 
 
-def slurm_status(job_ids, errors):
-    out = run(["sacct", "-n", "-X", "-P", "-j", ",".join(job_ids), "-o", "JobIDRaw,State,Submit,Start,Reason"],
-              errors=errors)
-    obs = {}
-    if out is None:
-        return obs, False
-    for ln in (out or "").splitlines():
-        p = ln.split("|")
-        if len(p) < 5:
-            continue
-        jid = p[0].split("_")[0]
-        started = p[3] not in ("", "Unknown", "None")
-        pend = None
-        try:
-            t0 = time.mktime(time.strptime(p[2], "%Y-%m-%dT%H:%M:%S"))
-            t1 = time.mktime(time.strptime(p[3], "%Y-%m-%dT%H:%M:%S")) if started else time.time()
-            pend = int(t1 - t0)
-        except ValueError:
-            pass
-        obs[jid] = {"elements": 1, "started": started, "stats": [p[1].split()[0]], "pend_s": pend,
-                    "pend_reason": "" if started else p[4], "start_time_raw": p[3], "source": "sacct"}
-    return obs, True
-
-
 def job_events(out_dir):
     submits, last = {}, {}
     for r in read_jsonl(os.path.join(out_dir, "jobs.jsonl")):
@@ -688,19 +619,14 @@ def cmd_started(a):
               f" ({done} recorded on earlier runs)")
         return 0
     errors = []
-    sched = scheduler()
     answered = {}  # job -> did the scheduler answer about it (found, or said it doesn't know it)
-    if sched == "slurm":
-        obs, ok = slurm_status(todo, errors)
-        answered = {j: ok for j in todo}
-    else:
-        obs, ok = lsf_status(todo, errors)
-        for j in todo:
-            answered[j] = ok
-            if ok and j not in obs:
-                h, answered[j] = lsf_bhist(j, errors)
-                if h:
-                    obs[j] = h
+    obs, ok = lsf_status(todo, errors)
+    for j in todo:
+        answered[j] = ok
+        if ok and j not in obs:
+            h, answered[j] = lsf_bhist(j, errors)
+            if h:
+                obs[j] = h
     n_started = 0
     for j in todo:
         o = obs.get(j)
@@ -714,7 +640,7 @@ def cmd_started(a):
             rec.update({"final": tries >= 2, "unknown": tries >= 2, "tries": tries,
                         "error": "not found by bjobs or bhist"})
         else:
-            terminal = all(s in ("DONE", "EXIT", "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT") for s in o["stats"])
+            terminal = all(s in ("DONE", "EXIT") for s in o["stats"])
             pend = o["pend_s"]
             if pend is None and not o["started"]:
                 pend = now - submits[j].get("ts", now)

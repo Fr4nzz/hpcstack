@@ -47,8 +47,8 @@ your own queue and your own jobs. The idle exit stays on, so no allocation is he
 --resume-cmd is split like a shell line but not run by a shell. Wrap it in `bash -c '...'` for pipes.
 
 Exit codes of `run`: 0 when the worker stopped normally (idle, max-hours, STOP), whatever the tasks'
-own results (read results/<id>.json). 128+N when signal N stopped it (bkill, scancel, the walltime warning
-sent by `bsub -wa USR2` or `sbatch --signal`): the running task's process group is stopped first and its
+own results (read results/<id>.json). 128+N when signal N stopped it (bkill, the walltime warning sent by
+`bsub -wa USR2`): the running task's process group is stopped first and its
 result is written as "interrupted", so `done(<job>)` dependents do not fire on a half-drained queue.
 A signal to the worker always means "stop everything". It is never a preemption. The task gets
 --preempt-signal with --preempt-grace after USR2 (the walltime warning: keep the grace below -wt), and
@@ -204,11 +204,11 @@ def iso(t):
 
 
 def job_id():
-    return os.environ.get("LSB_JOBID") or os.environ.get("SLURM_JOB_ID") or "local"
+    return os.environ.get("LSB_JOBID") or "local"
 
 
 def worker_name():
-    idx = os.environ.get("LSB_JOBINDEX") or os.environ.get("SLURM_ARRAY_TASK_ID")
+    idx = os.environ.get("LSB_JOBINDEX")
     return f"{socket.gethostname()}:{job_id()}" + (f"[{idx}]" if idx and idx != "0" else "") + f":{os.getpid()}"
 
 

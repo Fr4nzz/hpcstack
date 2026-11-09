@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # listing_job.sh: walk a directory tree ONCE, in a low-priority 1-core batch job, into one listing file.
 #
-#   listing_job.sh DIR OUT.tsv [--submit] [--sched lsf|slurm] [--queue Q] [--hours 4] [--run-here]
+#   listing_job.sh DIR OUT.tsv [--submit] [--queue Q] [--hours 4] [--run-here]
 #
-# Default: print the submit command and exit (review it first). --submit submits it.
+# Default: print the bsub command and exit (review it first). --submit submits it.
 # --run-here runs the walk in the current shell (only inside a job or on a local disk, never on a login node).
 #
 # Output: one line per entry, tab-separated: type size_bytes mtime_epoch path
@@ -13,11 +13,10 @@
 set -Eeuo pipefail
 
 usage() { sed -n '2,13p' "$0"; exit "${1:-0}"; }
-DIR="" OUT="" SUBMIT=0 SCHED="" QUEUE="" HOURS=4 HERE=0
+DIR="" OUT="" SUBMIT=0 QUEUE="" HOURS=4 HERE=0
 while (( $# )); do
   case $1 in
     --submit) SUBMIT=1; shift ;;
-    --sched) SCHED=$2; shift 2 ;;
     --queue) QUEUE=$2; shift 2 ;;
     --hours) HOURS=$2; shift 2 ;;
     --run-here) HERE=1; shift ;;
@@ -55,20 +54,12 @@ if (( HERE )); then
   exit 0
 fi
 
-if [[ -z $SCHED ]]; then
-  if command -v bsub >/dev/null 2>&1; then SCHED=lsf; elif command -v sbatch >/dev/null 2>&1; then SCHED=slurm
-  else echo "no bsub or sbatch found. Use --run-here on a local disk." >&2; exit 2; fi
-fi
+command -v bsub >/dev/null 2>&1 || { echo "no bsub found. Use --run-here on a local disk." >&2; exit 2; }
 SELF=$(readlink -f "$0")
 LOG=${OUT%.tsv}.log
 INNER=$(printf '%q ' bash "$SELF" "$DIR" "$OUT" --run-here)
-case $SCHED in
-  lsf)   cmd=(bsub -J listing -n 1 -M 1000 -R "select[mem>=1000] rusage[mem=1000]" -W "$HOURS:00" -sp 1
-              -o "$LOG" ${QUEUE:+-q "$QUEUE"} "$INNER") ;;
-  slurm) cmd=(sbatch -J listing --cpus-per-task=1 --mem=1G --time="$HOURS:00:00" --nice=1000
-              --output="$LOG" ${QUEUE:+--partition="$QUEUE"} --wrap="$INNER") ;;
-  *) echo "unknown scheduler $SCHED" >&2; exit 2 ;;
-esac
+cmd=(bsub -J listing -n 1 -M 1000 -R "select[mem>=1000] rusage[mem=1000]" -W "$HOURS:00" -sp 1 -o "$LOG"
+     ${QUEUE:+-q "$QUEUE"} "$INNER")
 
 if (( SUBMIT )); then
   "${cmd[@]}"

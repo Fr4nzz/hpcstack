@@ -76,9 +76,6 @@ print("Summary of time in seconds spent in various states:")
 print("  PEND     PSUSP    RUN      USUSP    SSUSP    UNKWN    TOTAL")
 print("  5000     0        300      0        0        0        5300")
 ''',
-    "sbatch": r'''
-print("777;cluster1")
-''',
     "bsub": r'''
 import json, os, sys
 st = json.load(open(os.environ["FAKE_STATE"]))
@@ -367,10 +364,6 @@ def test_parser_value_options_before_queue(lsf):  # O1
 def test_bsub_c_is_not_cores(lsf):  # O2
     run(lsf, PENDLOG, "submit", "--out", str(lsf["out"]), "--", "bsub", "-c", "30", "-q", "gpu", "x")
     assert jsonl(lsf["out"] / "jobs.jsonl")[-1]["request"]["cores"] is None
-    submit(lsf, "sbatch", "-c", "6", "-p", "gpu", "--parsable", "job.sh")
-    rec = jsonl(lsf["out"] / "jobs.jsonl")[-1]
-    assert (rec["request"]["cores"], rec["request"]["queue"]) == (6, "gpu")
-    assert rec["job_id"] == "777"  # O9: sbatch --parsable
 
 
 def test_submit_output_bytes_unchanged(lsf):  # S3
