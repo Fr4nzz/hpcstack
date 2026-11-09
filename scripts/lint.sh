@@ -7,8 +7,9 @@
 # (<= 150 lines, cluster-ops <= 200), agents/openai.yaml present, plugin.json lists exactly the skill folders,
 # JSON validity, `bash -n` and `shellcheck` (if installed) on shell scripts, Python syntax of Python scripts,
 # executable bits on helper scripts, no em dashes anywhere, no semicolons in Markdown prose, no bare <tag>-like
-# placeholders in Markdown prose (they render as HTML: <s> strikes out the rest, <date> vanishes). Code spans and
-# blocks are ignored, and so are autolinks such as <https://...>.
+# placeholders in Markdown prose (they render as HTML: <s> strikes out the rest, <date> vanishes). Both prose
+# checks skip ``` and ~~~ fences, indented code outside lists, code spans within a paragraph, and autolinks
+# such as <https://...>. Indented code inside a list item is checked as prose. Cases: tests/test_lint.py.
 set -Eeuo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -95,6 +96,32 @@ market = json.load(open(".claude-plugin/marketplace.json"))
 if not any(pl.get("name") == plugin.get("name") for pl in market.get("plugins", [])):
     err("marketplace.json does not list the plugin named in plugin.json")
 
+def mask_code(text):
+    """Blank out fenced blocks (``` or ~~~, closed by the same character at least as long), indented code
+    blocks outside lists, and code spans within one paragraph. Line breaks stay, so line numbers hold.
+    Indented code inside a list item is not recognised and is checked as prose."""
+    out, fence, in_list, prev_blank, prev_code = [], None, False, True, False
+    for line in text.split("\n"):
+        if fence:
+            m = re.match(r" {0,3}(`{3,}|~{3,})\s*$", line)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                fence = None
+            out.append(""); continue
+        m = re.match(r" {0,3}(`{3,}|~{3,})", line)
+        if m:
+            fence = m.group(1); out.append(""); prev_blank = prev_code = False; continue
+        blank = not line.strip()
+        if re.match(r" {0,3}([-*+]|\d+[.)])\s", line):
+            in_list = True
+        elif not blank and not line.startswith(" "):
+            in_list = False
+        code = not blank and line.startswith("    ") and not in_list and (prev_blank or prev_code)
+        out.append("" if code else line)
+        prev_blank, prev_code = blank, code or (prev_code and blank)
+    masked = "\n".join(out)
+    span = r"(`+)((?:(?!\1)[^\n]|\n(?![ \t]*\n))+?)(?<!`)\1(?!`)"
+    return re.sub(span, lambda m: "\n" * m.group(0).count("\n"), masked)
+
 for f in files:
     try:
         text = open(f, encoding="utf-8").read()
@@ -104,20 +131,13 @@ for f in files:
         if chr(0x2014) in line:
             err(f"{f}:{i}: em dash")
     if f.endswith(".md"):
-        in_code = False
-        for i, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("```"):
-                in_code = not in_code; continue
-            if in_code or line.startswith("    "):
-                continue
-            prose = re.sub(r"`[^`]*`", "", line)
-            prose = re.sub(r"<[^>]+>|\]\([^)]*\)", "", prose)
+        masked = mask_code(text)
+        for i, line in enumerate(masked.split("\n"), 1):
+            prose = re.sub(r"<[^>]+>|\]\([^)]*\)", "", line)
             if ";" in prose:
                 err(f"{f}:{i}: semicolon in prose")
         # A bare <word ...> outside code is raw HTML to a Markdown renderer: <s> strikes out the text after it,
-        # and <date> or <queue> vanish. Blank out fences and code spans (keeping line numbers), then look for tags.
-        masked = re.sub(r"(?ms)^\s*```.*?^\s*```[^\n]*$", lambda m: "\n" * m.group(0).count("\n"), text)
-        masked = re.sub(r"(`+)(?:(?!\1).)+?\1", lambda m: "\n" * m.group(0).count("\n"), masked, flags=re.S)
+        # and <date> or <queue> vanish.
         for m in re.finditer(r"</?[A-Za-z][A-Za-z0-9-]*(?=[\s/>])[^<>]*>", masked):
             if re.match(r"<[A-Za-z][A-Za-z0-9+.-]*:", m.group(0)):
                 continue   # autolink such as <https://...>
