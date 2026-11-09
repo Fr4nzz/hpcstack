@@ -15,9 +15,10 @@ Usage (on the login node, in the run folder):
 start   Refuses an empty, malformed or used NAME, and an allocation command without -Is (bsub) or --pty (srun),
         without a walltime (-W, --time or -t) or without hpc-session as the shell. Creates the tmux session NAME
         whose own command is the allocation (no login shell under it, so keys sent while the job pends, after a
-        rejection or after the end never reach a login-node shell). The allocation gets the environment and
-        folder of this call. Re-sends a readiness echo until the job's shell answers with a numeric job id and a
-        host other than this login node. Saves the state, prints it and exits 0.
+        rejection or after the end never reach a login-node shell). The allocation gets the environment (minus
+        secret-looking variables: tokens, keys, passwords) and folder of this call. Re-sends a readiness echo
+        until the job's shell answers with a numeric job id and a host other than this login node. Saves the
+        state, prints it and exits 0.
 run     Refuses a probe that is not ready, a missing session and a probe whose previous command has not ended.
         Sends the command with the next numbered marker, output to hpc-probe-logs/NAME/N.log and stdin from
         /dev/null, waits for that marker, prints the log tail and exits with the command's exit code. Variables
@@ -52,6 +53,14 @@ import time
 
 MAX_WAIT = 540
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|CREDENTIAL|_AUTH|AUTH_|COOKIE|SESSION_?KEY", re.I)
+
+
+def safe_env():
+    """The calling environment without secret-looking variables (tokens, keys, passwords), which never touch disk."""
+    return {k: v for k, v in os.environ.items() if not SECRET_NAME.search(k)}
+
+
 STATE_DIR = os.path.expanduser(os.environ.get("HPC_PROBE_DIR", "~/.hpc-probe"))
 TMUX = shlex.split(os.environ.get("HPC_PROBE_TMUX", "tmux"))
 POLL = float(os.environ.get("HPC_PROBE_POLL", "2"))
@@ -198,7 +207,7 @@ def cmd_start(name, timeout, argv):
     env_file = state_path(name) + ".env"
     fd_env = os.open(env_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     with os.fdopen(fd_env, "w") as f:
-        json.dump(dict(os.environ), f)
+        json.dump(safe_env(), f)
     save(st)
     launch = " ".join(shlex.quote(x) for x in (sys.executable, os.path.abspath(__file__), "_launch", name))
     tmux("new-session", "-d", "-s", name, "-x", "250", "-y", "50", "-c", cwd, launch, check=True)

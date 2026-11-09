@@ -36,7 +36,8 @@ and `attach`. Each call names the probe, so nothing depends on a variable from a
 | 125 | the session closed or the allocation command exited (rejected, released, walltime, `exit`) | `stop`, which checks the scheduler |
 | 1 | `stop` could not confirm that the job ended, so the session stays | keep monitoring and report |
 
-- The job gets the environment and folder of the `start` call. Variables and `module load` persist between
+- The job gets the environment (without secret-looking variables such as tokens, keys and passwords) and folder of
+  the `start` call. Variables and `module load` persist between
   `run` calls. Each command reads stdin from `/dev/null`, so a prompt fails instead of hanging.
 - Output goes to `hpc-probe-logs/<name>/<n>.log` in the run folder, which must be on storage the login node can
   read. State lives in `~/.hpc-probe/<name>.json`.
