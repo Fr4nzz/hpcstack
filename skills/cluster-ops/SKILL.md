@@ -91,7 +91,7 @@ request, labelled as such). If you cannot resolve one, report it and wait for th
    to be needed and the user agreed.
 3. Independent units are an array with a cap (`%N`) of tens, not hundreds (unless tasks are tiny and the queue
    is quiet), so it never takes a whole queue. No duplicate or speculative copies (check `bjobs` first).
-4.  Quota checked, bytes and files (`scripts/quota_report.sh <mount> <group> --gate`). Expected new file count
+4. Quota checked, bytes and files (`scripts/quota_report.sh <mount> <group> --gate`). Expected new file count
    recorded. Pack above about 50 per run. Temp files and expanded archives on node-local disk. Output to a new
    versioned directory.
 5. The job writes `status.json`, checkpoints, traps the walltime warning and cleans up. Dependencies use exact ids.
