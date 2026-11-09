@@ -98,4 +98,4 @@ Good: `hpc-session` with `-W 2:00`. The agent stops, and the watchdog releases t
   a failing command's own code, `set -e` not ending the shell, and logs in `~/.hpc-probe` readable from the compute
   node. `bjobs -J` found the full job name. A command past `--timeout` returned 124 and blocked the next `run`
   (exit 2). `stop` ended the job through Ctrl-C in `bsub` (exit 130, no `bkill`) and closed the pane.
-- Not yet tested: several GPUs in one job, another tenant on the same GPU, and LSF's own pre-kill warning.
+- Not yet tested: several GPUs in one job, another tenant on the same GPU, and the walltime warning (`-wa USR2 -wt 10`).

@@ -169,6 +169,8 @@ def main(argv):
     elif argv[0] == "--bjobs-json":
         with open(argv[1]) as fh:
             jobs = from_bjobs_json(fh.read())
+    elif argv[0].startswith("-") and argv[0] != "--user":
+        sys.exit(f"jobeff: unknown option {argv[0]}")
     else:
         jobs = lsf_jobs(argv, argv[0] == "--user")
     cols = ["job", "state", "cores", "cpu_eff", "peak", "req", "peak/req", "run", "suggest", "flags"]

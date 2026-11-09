@@ -34,10 +34,10 @@ run     Refuses a probe that is not ready, a missing or replaced session and a p
 wait    Keeps waiting after a start or run timeout, or after a tool call was cut off. Same exit codes.
 stop    Interrupts a running command and sends `exit`. Then it looks the job up by its job name and owner in
         bjobs, from the same LSF setup as start (LSF_ENVDIR, LSF_SERVERDIR). Only DONE, EXIT or no row at all
-        count as ended. Pending and suspended states count as live. A live job
-        with the recorded id is killed after 30 s, by that id. Any other answer (a row it cannot parse, an
-        unknown state, a different LSF setup) keeps the pane and the state and exits 1. Once the job has
-        ended it closes the tmux session (just the probe's pane if someone added panes).
+        count as ended. Pending and suspended states count as live. A live job with the recorded id is killed
+        after 30 s, by that id. Any other answer (a row it cannot parse, an unknown state, a different LSF
+        setup) keeps the pane and the state and exits 1. Once the job has ended it closes the tmux session (just
+        the probe's pane if someone added panes).
 attach  Prints the read-only attach command for a person who wants to watch.
 
 Exit codes: run and wait return the command's own code. Otherwise 0 ok, 1 stop could not confirm the end,
@@ -308,7 +308,7 @@ def allocation(argv):
     if "-Is" not in seen:
         return "bsub needs -Is for an interactive shell"
     if not seen & {"-W", "-t"}:
-        return "set a short walltime (-W)"
+        return "set a short walltime (-W 2:00, or -t)"
     return None
 
 
@@ -516,7 +516,8 @@ def job_lookup(st):
     LSF setup than start's give 'unknown'."""
     want = st.get("job_id")
     now = {k: os.environ.get(k) for k in CONTEXT_VARS}
-    if st.get("context") is not None and now != st["context"]:
+    saved = st.get("context")
+    if saved is not None and now != {k: saved.get(k) for k in CONTEXT_VARS}:
         print(f"hpc-probe: LSF setup differs from start ({st['context']} then, {now} now)")
         return "unknown", None
     cmd = ["bjobs", "-a", "-u", st["owner"], "-J", st["job_name"], "-noheader", "-o", "jobid job_name user stat"]

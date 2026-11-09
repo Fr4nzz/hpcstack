@@ -1,6 +1,6 @@
-"""Tests for skills/cluster-ops/scripts/hpc-probe with fake bsub, bjobs and bkill on a private tmux socket. The tmux server is started first with other settings (another HPC_PROBE_DIR, a bare PATH), as a
-long-lived server would be, and a bystander session stays open the whole time and must never receive input.
-Skipped without tmux."""
+"""Tests for skills/cluster-ops/scripts/hpc-probe with fake bsub, bjobs and bkill on a private tmux socket. The
+tmux server is started first with other settings (another HPC_PROBE_DIR, a bare PATH), as a long-lived server would
+be, and a bystander session stays open the whole time and must never receive input. Skipped without tmux."""
 import json
 import os
 import shutil
@@ -362,3 +362,30 @@ def test_environment_file_secret_filter_and_cleanup(env):
     assert not list((env["dir"] / "st").glob("*.env"))
     assert probe(env, "start", "e2", *LSF).returncode == 0                       # the name is free again
     assert probe(env, "stop", "e2").returncode == 0
+
+
+def test_probe_saved_by_older_version_still_stops(monkeypatch):
+    """A probe saved before SLURM was removed has extra context keys. The LSF keys alone decide."""
+    import importlib.machinery
+    import types
+    path = os.path.join(os.path.dirname(__file__), "..", "skills", "cluster-ops", "scripts", "hpc-probe")
+    loader = importlib.machinery.SourceFileLoader("hpc_probe_mod", path)
+    mod = types.ModuleType(loader.name)
+    loader.exec_module(mod)
+    monkeypatch.setenv("LSF_ENVDIR", "/lsf/conf")
+    monkeypatch.setenv("LSF_SERVERDIR", "/lsf/etc")
+    st = {"job_id": "4242", "owner": "me", "job_name": "hpc-probe-old-abc",
+          "context": {"LSF_ENVDIR": "/lsf/conf", "LSF_SERVERDIR": "/lsf/etc", "SLURM_CONF": None,
+                      "SLURM_CLUSTERS": None}}
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout="4242 hpc-probe-old-abc me RUN\n", stderr="")
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    assert mod.job_lookup(st) == ("running", "4242")
+    assert calls and calls[0][0] == "bjobs"
+    monkeypatch.setenv("LSF_ENVDIR", "/other/conf")
+    calls.clear()
+    assert mod.job_lookup(st) == ("unknown", None)
+    assert not calls
