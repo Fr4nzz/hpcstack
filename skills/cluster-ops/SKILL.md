@@ -37,20 +37,21 @@ sessions one at a time, after checking that each is an idle shell.
 P=/path/to/cluster-ops/scripts/hpc-probe   # login node, run folder. SLURM: srun --time=... --pty instead
 $P start probe-<task> -- bsub -Is -q <queue> -n 2 -M 4000 -R "select[mem>=4000] rusage[mem=4000]" -W 2:00 \
    -wa USR2 -wt 10 /path/to/cluster-ops/scripts/hpc-session
-$P run probe-<task> -- 'python check.py --quick'   # one command, at most 540 s, returns its exit code
+$P run probe-<task> -- 'python check.py --quick'   # waits up to 540 s, returns the command's exit code
 $P stop probe-<task>
 ```
 
-- `start` refuses a used name and returns once a job id and a compute host answer. No login shell sits under the
-  session. `run` exits with the command's code, 124 on a timeout, 125 if the allocation is gone. Details:
-  `references/interactive.md`.
+- `start` refuses a used name and returns once a job id and a compute host answer. Every call checks that the
+  tmux pane is still the one `start` made. `run` exits with the command's code, 3 if the pane was replaced, 124 on
+  a timeout, 125 if the allocation is gone. Give the tool call 600 s or a smaller `--timeout`. After a
+  cut-off call, `$P wait`. Secret-looking variables do not reach the job. Details: `references/interactive.md`.
 - `-W 2:00` is the hard backstop. Many sites refuse to extend a running job, so choose it up front.
 - `hpc-session` releases the job once nobody types and the job's CPU and GPUs are idle. A training inside it keeps
   the job alive.
 - Ask for what the probe needs (1 GPU, a few cores, measured memory). CPU-only work goes to a CPU queue. Record
   the job id, probe name and purpose where the user can see them (`$P attach` prints a read-only watch command).
-- `stop` exits the shell, confirms with `bjobs`/`squeue` that the job is gone (killing that exact id if needed),
-  and only then closes the session. If the job stays listed, it keeps the session: keep monitoring and report.
+- `stop` exits the shell, confirms by job name with `bjobs`/`squeue` that the job is gone (killing that exact id
+  if needed), and only then closes the pane. If the job stays listed, it keeps the session: monitor and report.
 
 ## Size the request
 
@@ -143,8 +144,8 @@ its own config. Recommend the move and let the user decide. Docs:
 ## Wait and monitor
 
 The job writes `status.json` (phase, progress, last metric, ETA). Wait with one background watcher that polls
-every 60 s and exits on a terminal state, a long PEND or an error, never with repeated `sleep` calls. The loop,
-long waits, stragglers and handoffs: `references/monitoring.md`.
+every 60 s and exits on a terminal state, a long PEND or an error, never with repeated `sleep` calls. Details:
+`references/monitoring.md`.
 
 `DONE` is a scheduler state, not a verdict. Before reporting a job finished, run the checks in
 `references/monitoring.md`, "When it ends". Long jobs checkpoint and survive a kill (`references/checkpointing.md`).
@@ -170,8 +171,8 @@ count when the inode quota is tight, by bytes when the byte quota is.
 Cleanup is a plan table (path, bytes, files, why it is safe, action) that the user approves, every time. Pack
 small-file trees with `tar --zstd`, and verify the entry count and a sha256 manifest before removing the
 originals. Log every deletion, never touch other users' files, and report the quota before and after. Never
-delete the source data of a trained or deployed model: pack it under a permanent folder with a README. Big wins,
-local disks and prevention: `references/storage.md`.
+delete the source data of a trained or deployed model: pack it under a permanent folder with a README. More:
+`references/storage.md`.
 
 A transfer can arrive silently truncated: compare `sha256sum` on both sides. Check an exact path with `stat` before
 concluding a file is missing. Over ssh (`ssh host 'tar -c ...' > file`), stdout must carry only the stream.
