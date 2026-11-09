@@ -96,7 +96,10 @@ Good: `hpc-session` with `-W 2:00`. The agent stops, and the watchdog releases t
   `KEYTAB_DIR`, `TOKENIZERS_PARALLELISM`, `LSF_EAUTH_KEY` and `SSH_AUTH_SOCK`, drops the secrets, and is gone after
   a successful and a failed `start`. Four mutations (name targets instead of pane ids, no wrapper check, plain
   sourcing, unknown states read as ended) each make a test fail.
-- Not yet run with real `bsub -Is` or `srun --pty`, so the readiness echo through a real pending job, the job-name
-  lookups (`bjobs -a -u <owner> -J <name>`, `squeue -u <owner> -n <name>`) and Ctrl-C through `bsub` are unchecked.
-- Not yet tested: `hpc-session-slurm`, several GPUs in one job, another tenant on the same GPU, and the
+- Tested on LSF (farm22, `cpu-interactive`, 2 cores, 4 GB, `-W 2:00`, tmux 3.2a, Python 3.10): `start` became
+  ready through a real `bsub -Is` (job id and compute host). `run` worked from separate calls, with `#` and quotes,
+  a failing command's own code, `set -e` not ending the shell, and logs in `~/.hpc-probe` readable from the compute
+  node. `bjobs -J` found the full job name. A command past `--timeout` returned 124 and blocked the next `run`
+  (exit 2). `stop` ended the job through Ctrl-C in `bsub` (exit 130, no `bkill`) and closed the pane.
+- Not yet tested: `srun --pty`, `hpc-session-slurm`, several GPUs in one job, another tenant on the same GPU, and the
   scheduler's own pre-kill warning.

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """hpc-probe: drive an interactive allocation from an agent, one tool call per action.
 
-UNTESTED on a real cluster: tested only with fake bsub, srun, bjobs, bkill, squeue and scancel in a private tmux
-socket (tests/test_hpc_probe.py).
+Tested on LSF (farm22) with a real bsub -Is, and with fake bsub, srun, bjobs, bkill, squeue and scancel in a
+private tmux socket (tests/test_hpc_probe.py). The SLURM path is UNTESTED on a real cluster.
 
 Usage (on the login node, in the run folder):
   hpc-probe start NAME [--timeout S] -- bsub -Is -q QUEUE -W 2:00 [other bsub options]
