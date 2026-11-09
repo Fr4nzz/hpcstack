@@ -2,8 +2,10 @@
 tmux socket. The tmux server is started first with other settings (another HPC_PROBE_DIR, a bare PATH), as a
 long-lived server would be, and a bystander session stays open the whole time and must never receive input.
 Skipped without tmux."""
+import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -13,16 +15,19 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PROBE = ROOT / "skills/cluster-ops/scripts/hpc-probe"
-WRAP = str(ROOT / "skills/cluster-ops/scripts/hpc-session")
-WRAP_SLURM = str(ROOT / "skills/cluster-ops/scripts/hpc-session-slurm")
+WRAP = str((ROOT / "skills/cluster-ops/scripts/hpc-session").resolve())
+WRAP_SLURM = str((ROOT / "skills/cluster-ops/scripts/hpc-session-slurm").resolve())
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
 
 # Fake scheduler. Jobs live in $FAKE_DIR/job.<id> as "id name user state". With FAKE_GATE set, a job pends until
-# the test creates $FAKE_DIR/release, so "typed while pending" is really typed while pending.
+# the test creates $FAKE_DIR/release, so "typed while pending" is really typed while pending. The fake starts a
+# shell only when its last argument is the trusted wrapper, the way the real command would be that wrapper.
 FAKE_ALLOC = r"""#!/usr/bin/env bash
 dir=$FAKE_DIR; mode=${FAKE_MODE:-ok}; me=$(basename "$0"); jname=; prev=
 for a in "$@"; do [[ $prev == -J ]] && jname=$a; [[ $a == --job-name=* ]] && jname=${a#--job-name=}; prev=$a; done
-echo "$*" >> "$dir/alloc-args"
+printf '%s\n' "$*" >> "$dir/alloc-args"
+want=$FAKE_WRAP_LSF; [[ $me == srun ]] && want=$FAKE_WRAP_SLURM
+[[ ${!#} == "$want" ]] || { echo "fake $me: the command is not the wrapper"; exit 98; }
 c=$(cat "$dir/count.$me" 2>/dev/null || echo 0); echo $((c + 1)) > "$dir/count.$me"
 if [[ $me == bsub ]]; then id=$((4242 + c)); var=LSB_JOBID; P=PEND; R=RUN; D=DONE; X=EXIT
   echo "Job <$id> is submitted to queue <normal>."; echo "<<Waiting for dispatch ...>>"
@@ -42,9 +47,10 @@ s=$?
 exit $s
 """
 FAKE_BJOBS = r"""#!/usr/bin/env bash
-# bjobs -a -u USER -J NAME -noheader -o "..."
+# bjobs -a -u USER -J NAME -noheader -o "..."; FAKE_DECORATE prints the name the way a site might truncate it
 while (( $# )); do case $1 in -J) n=$2; shift ;; -u) u=$2; shift ;; esac; shift; done
 hit=$(cat "$FAKE_DIR"/job.* 2>/dev/null | awk -v n="$n" -v u="$u" '$2 == n && $3 == u')
+[[ -n ${FAKE_DECORATE:-} ]] && hit=${hit/ hpc-probe-/ *probe-}
 [[ -n $hit ]] && echo "$hit" || { echo "Job <$n> is not found" >&2; exit 255; }
 """
 FAKE_SQUEUE = r"""#!/usr/bin/env bash
@@ -79,7 +85,8 @@ def env(tmp_path):
     sock = f"hpcprobe-{os.getpid()}-{tmp_path.name}"[:90]
     tm = ["tmux", "-L", sock]
     e = dict(os.environ, PATH=f"{bin_}:{os.environ['PATH']}", FAKE_DIR=str(tmp_path), HPC_PROBE_DIR=str(tmp_path / "st"),
-             HPC_PROBE_TMUX=" ".join(tm), HPC_PROBE_POLL="0.2", HPC_PROBE_RESEND="1", REAL_SOCK=sock)
+             HPC_PROBE_TMUX=" ".join(tm), HPC_PROBE_POLL="0.2", HPC_PROBE_RESEND="1", HPC_PROBE_STOP_GRACE="3",
+             REAL_SOCK=sock, FAKE_WRAP_LSF=WRAP, FAKE_WRAP_SLURM=WRAP_SLURM)
     e.pop("TMUX", None)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -96,11 +103,11 @@ def env(tmp_path):
     assert received == "", "the bystander session received input"
 
 
-def probe(env, *args, timeout=90, **extra):
+def probe(env, *args, timeout=90, umask=None, **extra):
     e = dict(env["env"], **extra)
     t0 = time.time()
     r = subprocess.run([sys.executable, str(PROBE), *args], cwd=env["run"], env=e, capture_output=True, text=True,
-                       timeout=timeout)
+                       timeout=timeout, preexec_fn=(lambda: os.umask(umask)) if umask is not None else None)
     r.elapsed = time.time() - t0
     return r
 
@@ -118,6 +125,14 @@ def kills(env):
     return f.read_text() if f.exists() else ""
 
 
+def state(env, name):
+    return json.loads((env["dir"] / "st" / f"{name}.json").read_text())
+
+
+def mode(path):
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
 def wait_for(cond, timeout=20):
     t_end = time.time() + timeout
     while time.time() < t_end:
@@ -127,8 +142,8 @@ def wait_for(cond, timeout=20):
     return False
 
 
-LSF = ["--", "bsub", "-Is", "-q", "normal", "-W", "2:00", WRAP]
-SLURM = ["--", "srun", "--time=02:00:00", "--pty", WRAP_SLURM]
+LSF = ["--", "bsub", "-Is", "-q", "normal", "-W", "2:00"]
+SLURM = ["--", "srun", "--time=02:00:00", "--pty"]
 
 
 def test_refuses_bad_names_timeouts_and_allocations(env):
@@ -140,59 +155,101 @@ def test_refuses_bad_names_timeouts_and_allocations(env):
     for t in ("nan", "inf", "-inf", "0", "541", "x"):
         assert probe(env, "start", "p1", "--timeout", t, *LSF).returncode == 2, t
         assert probe(env, "run", "p1", "--timeout", t, "--", "true").returncode == 2, t
-    bad = [["bsub", "-q", "normal", "-W", "1:00", WRAP],                          # no -Is
-           ["bsub", "-Is", WRAP],                                                # no walltime
-           ["bsub", "-Is", "-W", "1:00", "-J", "hpc-session-x", "bash"],         # decoy job name, bare bash
-           ["bsub", "-Is", "-W", "1:00", "-q", "hpc-session", "bash"],           # decoy option value
-           ["bsub", "-Is", "-W", "1:00", "-q", "normal", "bash", WRAP],          # wrapper only an argument of bash
-           ["bsub", "-Is", "-W", "1:00", WRAP + "-old"],                         # wrong wrapper name
-           ["bsub", "-Is", "-W", "1:00", "/nonexistent/hpc-session"],            # not an executable file
-           ["bsub", "-Is", "-W", "1:00", WRAP_SLURM],                            # SLURM wrapper under LSF
-           ["srun", "--time=1:00:00", "--pty", "bash", WRAP_SLURM],             # wrapper only an argument
-           ["srun", "--time=1:00:00", "--pty", "--job-name=x", WRAP_SLURM],     # own job name
-           ["sbatch", "--time=1:00:00", WRAP_SLURM]]
+    assert probe(env, "run", "p1", "--tail", "-5", "--", "true").returncode == 2
+    bad = [["bsub", "-q", "normal", "-W", "1:00"],                                   # no -Is
+           ["bsub", "-Is", "-q", "normal"],                                          # no walltime
+           ["bsub", "-Is", "-W", "2:00", "bash", "-c", "exec bash -i", "--", WRAP],  # a shell, wrapper unused
+           ["bsub", "-Is", "-W", "2:00", "bash"],                                    # a bare command
+           ["bsub", "-Is", "-W", "2:00", WRAP],                                      # hpc-probe adds the wrapper
+           ["bsub", "-Is", "-W", "2:00", "-J", "hpc-session-x"],                     # own job name
+           ["bsub", "-Is", "-W", "2:00", "-Z", "x"],                                 # unknown option
+           ["bsub", "-Is", "-W"],                                                    # option without its value
+           ["srun", "--time=02:00:00", "--pty", "bash", "-c", "exec bash -i", "--", WRAP_SLURM],
+           ["srun", "--time=02:00:00", "--pty", "--job-name=x"],
+           ["srun", "--time=02:00:00", "--pty", "--frobnicate", "x"],                # unknown long option, no =
+           ["srun", "--pty"],                                                        # no walltime
+           ["sbatch", "--time=1:00:00"]]
     for argv in bad:
         r = probe(env, "start", "p1", "--", *argv)
         assert r.returncode == 2, (argv, r.stdout)
-    assert not (env["dir"] / "alloc-args").exists()                          # nothing was submitted
+    assert not (env["dir"] / "alloc-args").exists()                              # nothing was submitted
 
 
 def test_lsf_markers_commands_timeout_and_stop(env):
-    r = probe(env, "start", "p1", *LSF)
+    # the full SKILL.md example is accepted, and the trusted wrapper is appended as the command
+    r = probe(env, "start", "p1", "--", "bsub", "-Is", "-q", "normal", "-n", "2", "-M", "4000", "-R",
+              "select[mem>=4000] rusage[mem=4000]", "-W", "2:00", "-wa", "USR2", "-wt", "10")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "job=4242 host=fakenode sched=lsf job_name=hpc-probe-p1-" in r.stdout
-    assert "-J hpc-probe-p1-" in (env["dir"] / "alloc-args").read_text()
-    assert probe(env, "start", "p1", *LSF).returncode == 2                   # name in use
+    args = (env["dir"] / "alloc-args").read_text().strip()
+    assert args.startswith("-J hpc-probe-p1-") and args.endswith(f"-wt 10 {WRAP}")
+    assert probe(env, "start", "p1", *LSF).returncode == 2                       # name in use
     r = probe(env, "run", "p1", "--", "echo hello # a comment")
     assert r.returncode == 0 and "hello" in r.stdout, r.stdout
-    r = probe(env, "run", "p1", "--", "echo it's")                            # unbalanced quote
+    r = probe(env, "run", "p1", "--", "echo it's")                                # unbalanced quote
     assert r.returncode not in (0, 124) and r.elapsed < 15, r.stdout
     r = probe(env, "run", "p1", "--", "export X=5; sh -c 'exit 3'")
     assert r.returncode == 3, r.stdout
     t0 = time.time()
-    r = probe(env, "run", "p1", "--", "sleep 2; echo $X")                     # old markers must not end this wait
+    r = probe(env, "run", "p1", "--", "sleep 2; echo $X")                         # old markers must not end this wait
     assert r.returncode == 0 and "5" in r.stdout and time.time() - t0 >= 2
     r = probe(env, "run", "p1", "--timeout", "1", "--", "sleep 8; echo late")
     assert r.returncode == 124 and r.elapsed < 6 and "still running" in r.stdout
-    assert probe(env, "run", "p1", "--", "true").returncode == 2             # previous command not ended
+    assert probe(env, "run", "p1", "--", "true").returncode == 2                 # previous command not ended
     r = probe(env, "wait", "p1")
     assert r.returncode == 0 and "late" in r.stdout
-    assert (env["run"] / "hpc-probe-logs/p1/5.log").read_text() == "late\n"
-    assert "attach -r -t '$" in probe(env, "attach", "p1").stdout          # the session id, not the name
+    assert (Path(state(env, "p1")["log_dir"]) / "5.log").read_text() == "late\n"
+    assert "attach -r -t '$" in probe(env, "attach", "p1").stdout              # the session id, not the name
     r = probe(env, "stop", "p1")
     assert r.returncode == 0, r.stdout
     assert tmux(env, "has-session", "-t", "=p1").returncode != 0
-    assert kills(env) == ""                                                  # exit was enough, no kill
+    assert kills(env) == ""                                                      # exit was enough, no kill
+
+
+def test_shell_options_do_not_leak_between_runs(env):
+    assert probe(env, "start", "o1", *LSF).returncode == 0
+    assert probe(env, "run", "o1", "--", "set -euo pipefail; trap 'exit 7' ERR; echo one").returncode == 0
+    r = probe(env, "run", "o1", "--", "grep nothing /dev/null")                  # fails, must not end the shell
+    assert r.returncode == 1, r.stdout
+    r = probe(env, "run", "o1", "--", "set -e; false; echo after")               # set -e cannot end the shell
+    assert r.returncode == 0 and "after" in r.stdout, r.stdout
+    r = probe(env, "run", "o1", "--", "echo ${UNSET_VARIABLE:-unset-ok}; echo alive")
+    assert r.returncode == 0 and "alive" in r.stdout, r.stdout
+    assert probe(env, "stop", "o1").returncode == 0
 
 
 def test_slurm_readiness_and_completed_is_ended(env):
     r = probe(env, "start", "s1", *SLURM)
     assert r.returncode == 0 and "job=777 host=fakenode sched=slurm" in r.stdout, r.stdout + r.stderr
-    assert "--job-name=hpc-probe-s1-" in (env["dir"] / "alloc-args").read_text()
+    args = (env["dir"] / "alloc-args").read_text().strip()
+    assert args.startswith("--job-name=hpc-probe-s1-") and args.endswith(f"--pty {WRAP_SLURM}")
     assert probe(env, "run", "s1", "--", "echo $SLURM_JOB_ID").stdout.startswith("777")
     r = probe(env, "stop", "s1")                     # squeue still lists the job as COMPLETED: that is ended
     assert r.returncode == 0 and r.elapsed < 15, r.stdout
     assert kills(env) == ""
+
+
+def test_held_slurm_job_is_live_and_cancelled(env):
+    assert probe(env, "start", "s2", *SLURM, FAKE_MODE="sticky").returncode == 0
+    (env["dir"] / "job.777").write_text(f"777 {state(env, 's2')['job_name']} {os.environ.get('USER', '')} SPECIAL_EXIT\n")
+    r = probe(env, "stop", "s2")
+    assert r.returncode == 0, r.stdout
+    assert kills(env) == "scancel 777\n"
+
+
+def test_stop_keeps_everything_when_the_answer_is_unclear(env):
+    assert probe(env, "start", "u1", *LSF, FAKE_MODE="sticky").returncode == 0
+    # a row it cannot read as this job (a truncated name), an unknown state, another scheduler setup
+    for extra, row_state in (({"FAKE_DECORATE": "1"}, "RUN"), ({}, "WEIRD"), ({"LSF_ENVDIR": "/elsewhere"}, "RUN")):
+        (env["dir"] / "job.4242").write_text(f"4242 {state(env, 'u1')['job_name']} {os.environ.get('USER', '')} "
+                                             f"{row_state}\n")
+        r = probe(env, "stop", "u1", **extra)
+        assert r.returncode == 1 and "stay" in r.stdout, (extra, r.stdout)
+        assert state(env, "u1")["status"] != "stopped"
+        assert kills(env) == ""
+    assert tmux(env, "has-session", "-t", "=u1").returncode == 0                  # the pane is still there
+    (env["dir"] / "job.4242").write_text(f"4242 {state(env, 'u1')['job_name']} {os.environ.get('USER', '')} DONE\n")
+    assert probe(env, "stop", "u1").returncode == 0
 
 
 def test_type_ahead_while_pending_and_after_rejection_never_runs(env):
@@ -229,7 +286,7 @@ def test_closed_session_and_ended_allocation_return_at_once(env):
     r = probe(env, "run", "by", "--", "echo should-not-arrive")
     assert r.returncode == 125 and r.elapsed < 10
     assert probe(env, "start", "c2", *LSF).returncode == 0
-    tmux(env, "send-keys", "-t", "=c2:", "exit", "Enter", check=True)        # watchdog release
+    tmux(env, "send-keys", "-t", "=c2:", "exit", "Enter", check=True)            # watchdog release
     time.sleep(1)
     r = probe(env, "run", "c2", "--", "sleep 30")
     assert r.returncode == 125 and r.elapsed < 10
@@ -244,7 +301,7 @@ def test_replacement_session_with_same_name_gets_nothing(env):
     assert probe(env, "run", "p1", "--", "true").returncode == 3
     r = probe(env, "stop", "p1")
     assert r.returncode == 0 and "left alone" in r.stdout, r.stdout
-    assert tmux(env, "has-session", "-t", "=p1").returncode == 0               # the replacement still runs
+    assert tmux(env, "has-session", "-t", "=p1").returncode == 0                   # the replacement still runs
     assert kills(env) == "bkill 4242\n"                    # the job outlived its killed client: that exact id
     time.sleep(0.5)
     assert (env["dir"] / "replacement.txt").read_text() == "" and not (env["dir"] / "ran").exists()
@@ -263,7 +320,7 @@ def test_added_active_pane_gets_nothing(env):
 
 def test_reused_job_id_is_never_killed(env):
     assert probe(env, "start", "p3", *LSF).returncode == 0
-    assert probe(env, "run", "p3", "--", "exit").returncode == 125           # the job ends with its shell
+    assert probe(env, "run", "p3", "--", "exit").returncode == 125               # the job ends with its shell
     # the scheduler gives id 4242 to another job (another probe of the same user), now running
     (env["dir"] / "job.4242").write_text(f"4242 hpc-probe-other-abcd {os.environ.get('USER', '')} RUN\n")
     r = probe(env, "stop", "p3")
@@ -274,7 +331,7 @@ def test_reused_job_id_is_never_killed(env):
 def test_pending_start_times_out_then_wait(env):
     r = probe(env, "start", "w1", "--timeout", "1", *LSF, FAKE_GATE="1")
     assert r.returncode == 124 and "hpc-probe wait w1" in r.stdout
-    assert probe(env, "run", "w1", "--", "true").returncode == 2             # not ready
+    assert probe(env, "run", "w1", "--", "true").returncode == 2                 # not ready
     (env["dir"] / "release").touch()
     assert probe(env, "wait", "w1").returncode == 0
     assert probe(env, "run", "w1", "--", "true").returncode == 0
@@ -288,20 +345,46 @@ def test_stop_kills_exact_id_when_job_outlives_its_shell(env):
     assert kills(env) == "bkill 4242\n"
 
 
+def test_command_and_log_files_are_private_and_never_follow_links(env):
+    assert probe(env, "start", "f1", *LSF, umask=0o022).returncode == 0
+    assert probe(env, "run", "f1", "--", "echo placeholder-not-a-token", umask=0o022).returncode == 0
+    d = Path(state(env, "f1")["log_dir"])
+    assert mode(env["dir"] / "st") == 0o700 and mode(d) == 0o700
+    assert mode(d / "1.sh") == 0o600 and mode(d / "1.log") == 0o600 and mode(env["dir"] / "st/f1.json") == 0o600
+    os.chmod(d, 0o755)                                                           # a folder made too wide is tightened
+    victim = env["dir"] / "victim.txt"
+    victim.write_text("untouched\n")
+    os.symlink(victim, d / "2.sh")                                               # a planted link is never followed
+    r = probe(env, "run", "f1", "--", "echo hi", umask=0o022)
+    assert r.returncode == 2 and "safely" in r.stdout, r.stdout
+    assert victim.read_text() == "untouched\n" and mode(d) == 0o700
+    assert "_2_END_" not in pane_text(env, state(env, "f1")["pane_id"])          # nothing was sent
+    assert probe(env, "stop", "f1").returncode == 0
+
+
 def test_environment_file_secret_filter_and_cleanup(env):
-    secrets = {"HF_TOKEN": "s1", "MY_PASS": "s2", "OPENAI_KEY": "s3", "MYSQL_PWD": "s4", "KEEP_ME": "kept"}
-    assert probe(env, "start", "e1", *LSF, **secrets).returncode == 0
-    assert not list((env["dir"] / "st").glob("*.env"))                       # removed once the launcher read it
-    r = probe(env, "run", "e1", "--", "echo ${HF_TOKEN:-unset} ${MY_PASS:-unset} ${OPENAI_KEY:-unset} "
-                                     "${MYSQL_PWD:-unset} ${KEEP_ME:-unset}")
-    assert r.stdout.splitlines()[0] == "unset unset unset unset kept", r.stdout
+    secrets = {"HF_TOKEN": "s1", "MY_PASS": "s2", "OPENAI_API_KEY": "s3", "MYSQL_PWD": "s4",
+               "AWS_SECRET_ACCESS_KEY": "s5", "GH_PASSWORD": "s6"}
+    keep = {"KEEP_ME": "kept", "OLDPWD": "/old", "KEYTAB_DIR": "/k", "http_proxy": "http://proxy:3128",
+            "https_proxy": "http://proxy:3128", "TOKENIZERS_PARALLELISM": "false", "LSF_EAUTH_KEY": "site",
+            "SSH_AUTH_SOCK": "/tmp/agent.sock"}
+    r = probe(env, "start", "e1", *LSF, **secrets, **keep)
+    assert r.returncode == 0, r.stdout
+    assert "not passed to the job" in r.stdout and all(k in r.stdout for k in secrets)
+    assert not list((env["dir"] / "st").glob("*.env"))                           # removed once the launcher read it
+    names = list(secrets) + list(keep)
+    r = probe(env, "run", "e1", "--", "for v in " + " ".join(names) + '; do printf "%s=%s\\n" $v "${!v:-unset}"; done')
+    got = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line and not line.startswith("hpc-"))
+    assert all(got[k] == "unset" for k in secrets), got
+    # bash itself resets OLDPWD at startup (to a folder that exists), so it is checked in the saved file below
+    assert all(got[k] == v for k, v in keep.items() if k != "OLDPWD"), got
     assert probe(env, "stop", "e1").returncode == 0
-    # a failing tmux new-session: the file was 0600 without the secrets, and it is gone afterwards
-    r = probe(env, "start", "e2", *LSF, HPC_PROBE_TMUX=str(env["dir"] / "bin/tmux-failing-new"), **secrets)
+    # a failing tmux new-session: the file was 0600, kept PWD and OLDPWD, had no secrets, and is gone afterwards
+    r = probe(env, "start", "e2", *LSF, HPC_PROBE_TMUX=str(env["dir"] / "bin/tmux-failing-new"), **secrets, **keep)
     assert r.returncode == 2 and "new-session failed" in r.stdout, r.stdout
     assert (env["dir"] / "env-mode").read_text().strip() == "600"
-    saved = (env["dir"] / "env-copy").read_text()
-    assert "KEEP_ME" in saved and not any(k in saved for k in ("HF_TOKEN", "MY_PASS", "OPENAI_KEY", "MYSQL_PWD"))
+    saved = json.loads((env["dir"] / "env-copy").read_text())
+    assert {"PWD", "OLDPWD", *keep} <= set(saved) and not set(secrets) & set(saved)
     assert not list((env["dir"] / "st").glob("*.env"))
-    assert probe(env, "start", "e2", *LSF).returncode == 0                   # the name is free again
+    assert probe(env, "start", "e2", *LSF).returncode == 0                       # the name is free again
     assert probe(env, "stop", "e2").returncode == 0
