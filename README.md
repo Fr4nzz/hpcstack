@@ -5,14 +5,14 @@ Agent skills for shared clusters: faster, cheaper, and fairer to everyone else i
 These skills teach a coding agent (Claude Code, Codex, or anything that reads `SKILL.md`) to work on a shared
 batch cluster the way a careful colleague would. Jobs ask for what they use, measure before they optimise, clean
 up after themselves, and stop when their budget is spent. LSF is the primary scheduler, with SLURM equivalents.
-They come from real jobs on a large LSF cluster.
+The rules come from real jobs on a large LSF cluster.
 
 ## Skills
 
 | Skill | Say | What it does |
 |---|---|---|
-| `cluster-ops` | "run this on the cluster", "how much memory?", "give me a GPU shell", "what can I delete?" | Submit, size, monitor and recover jobs. Interactive sessions that release themselves, a preflight checklist, inode-first storage audits, workflow managers. |
-| `optimize-pipeline` | "make this faster" | Profile, pre-register hypotheses, separate exact from distribution-changing changes, measure. |
+| `cluster-ops` | "run this on the cluster", "why is my job pending?", "give me a GPU shell", "what can I delete?" | Submit, size, monitor and recover jobs. Interactive sessions that release themselves, a preflight checklist, inode-first storage audits, workflow managers. |
+| `optimize-pipeline` | "make this faster", "why is this so slow?" | Profile, pre-register hypotheses, separate exact from distribution-changing changes, measure. |
 | `cluster-autoresearch` | "run experiments overnight" | A budgeted keep-or-discard loop with `results.tsv` and `progress.png`. |
 
 ## Install
@@ -67,7 +67,8 @@ useful issues you can open.
   `references/`. Scripts run with `--help`, and anything not run on a real cluster is marked UNTESTED.
 - This repo is public: no user names, group names, home or scratch paths, host names, job ids, quota levels or
   chat transcripts. Put your own patterns in `.scrub-patterns.local` (git-ignored), one regex per line.
-- Plain sentences, no em dashes, no semicolons in prose. Savings claims need measured numbers.
+- Plain sentences, no em dashes, no semicolons in prose, and placeholders such as `<queue>` in backticks.
+  Savings claims need measured numbers.
 
 ## License
 
