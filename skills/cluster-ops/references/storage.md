@@ -40,3 +40,30 @@ Check known caches first (`~/.cache/pip`, `~/.cache/uv`, conda pkgs, `~/.cache/h
 - Every input a model or pipeline needs exists on the cluster's shared storage, not only on a workstation.
 - `quota_report.sh <mount> <group> --gate` exits non-zero above 95 % of a limit or below 10,000 files of headroom
   (both adjustable), so a submit script can stop on it.
+
+## Transfers
+
+On a long path (another continent, 150 ms or more) one TCP stream is slow and unsteady: every packet loss cuts
+its rate, and the sender, often a bastion or proxy, is not yours to tune. Several streams at once add up. Each
+new ssh session also has a fixed setup cost (seconds through a proxy), so many small files sent one by one are
+slow whatever the bandwidth.
+
+`scripts/xfer` runs on your machine. Set `XFER_SSH` to your ssh command (`ssh`, or `tsh ssh` for Teleport).
+
+```bash
+xfer get -n 8 <host>:/abs/path/model.pt model.pt      # one big file in 8 byte ranges
+xfer many -P 8 <host> paths.txt out/                  # many medium files, one stream each
+xfer put results.tar <host>:/abs/path/results.tar     # one verified upload
+<ssh> <host> 'tar -C /abs/dir -cf - sub' > sub.tar    # hundreds of tiny files: one stream, then tar -tf
+```
+
+- `get` checks every range against a hash made on the cluster from the same bytes, then the whole file against
+  `sha256sum`. Re-running resumes from the verified ranges. `many` skips files already done.
+- `put` writes to a temporary name, compares hashes and only then renames. It never overwrites.
+- Measured on one 175 ms path through a Teleport proxy (November 2026): one stream gave 0.1 to 11 MB/s, usually
+  1.6 to 3.5, and changed within minutes. 8 streams gave 11.7 MB/s, and 16 were slower than 8. Uploads ran 6
+  to 7 MB/s on one stream. Start at 8 and measure on your own path.
+- If plain OpenSSH works, a `ControlMaster` connection cuts the setup of each later command roughly in half.
+- Never run a VPN, tunnel or daemon on a cluster login node to speed up transfers. Ask the site about a data
+  transfer node instead.
+

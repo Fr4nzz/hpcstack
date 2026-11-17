@@ -23,6 +23,8 @@ Verify every limit on the cluster before relying on it.
 - A running job's `-M` cannot be changed, and the site esub can refuse `bmod -R` or `bmod -mn` on pending
   GPU jobs. Resubmit instead.
 - Users cannot ssh to compute nodes to rescue a job. The job must publish anything it needs to save.
+- Transfers go through the Teleport proxy: `XFER_SSH='tsh ssh' xfer get -n 8 ...` (`cluster-ops`). The Teleport
+  login is used only at sign-in and does not cap the data stream.
 - Idle-job exceptions: `bqueues -l <queue> | grep -A2 -i idle`. They notify only and are not defined on every
   queue, so they are no substitute for `hpc-session` (`cluster-ops`).
 

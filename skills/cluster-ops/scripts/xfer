@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# xfer: fast, verified file transfers over ssh between your machine and a cluster, for long (high-latency) paths.
+#
+#   xfer get  [-n STREAMS] HOST:/abs/remote/file LOCAL_FILE
+#   xfer many [-P PARALLEL] HOST LIST LOCAL_DIR
+#   xfer put  LOCAL_FILE HOST:/abs/remote/file
+#
+# get   One file in STREAMS byte ranges (default 8), each over its own ssh session. Each range is SHA-256 checked
+#       against a hash computed remotely on the same bytes, then the whole file against a remote sha256sum.
+#       Re-running the same command resumes: verified parts stay in LOCAL_FILE.parts/. Writes LOCAL_FILE.sha256.
+# many  Many files at once (default 8 in parallel), one verified stream per file. LIST holds one absolute remote
+#       path per line, with unique basenames. Files land in LOCAL_DIR/<basename>, and files already done
+#       (<basename>.sha256 present) are skipped. For hundreds of tiny files, stream one tar instead.
+# put   One file over one stream into a temporary remote name, checked with a remote sha256sum, then renamed
+#       into place. Refuses to overwrite an existing remote file.
+#
+# Env: XFER_SSH       the ssh command, split on spaces (default "ssh", "tsh ssh" for Teleport)
+#      XFER_RETRIES   retries per failed part or upload (default 3)
+#      XFER_NOFULLHASH=1  get skips the whole-file remote hash (the per-range hashes still run)
+# The remote side needs bash, GNU dd, stat and sha256sum. Prints "OK <file> sha256 <hash>" on success.
+# Exit codes: 2 usage, 3 remote stat failed, 4 parts or files failed, 5 size mismatch, 6 hash mismatch,
+# 7 remote file exists.
+set -Eeuo pipefail
+
+read -r -a SSH <<< "${XFER_SSH:-ssh}"
+RETRIES=${XFER_RETRIES:-3}
+
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
+die() { local c=$1; shift; echo "xfer: $*" >&2; exit "$c"; }
+rq() { printf '%q' "$1"; }
+remote() { local h=$1; shift; "${SSH[@]}" "$h" "$*"; }
+split_spec() {
+  [[ $1 == *:/* ]] || die 2 "remote must be HOST:/absolute/path, got '$1'"
+  HOST=${1%%:/*}; RPATH=/${1#*:/}
+}
+
+get_part() {   # $1 = part index. Writes the part and its remote hash, returns 0 only when verified.
+  local i=$1 off len p got want_h got_h
+  off=$(( i * CH )); len=$(( SIZE - off < CH ? SIZE - off : CH )); p=$(printf '%s/p%04d' "$PARTS" "$i")
+  [[ -s $p.ok ]] && return 0
+  # stdout carries the bytes, stderr the remote SHA-256 of exactly those bytes
+  remote "$HOST" "dd if=$(rq "$RPATH") iflag=skip_bytes,count_bytes skip=$off count=$len bs=4M status=none" \
+    "| tee >(sha256sum | cut -d' ' -f1 >&2)" < /dev/null > "$p" 2> "$p.rsha" || true
+  got=$(stat -c %s "$p" 2>/dev/null || echo 0)
+  want_h=$(grep -Eo '^[0-9a-f]{64}$' "$p.rsha" | tail -n1 || true)
+  got_h=$(sha256sum "$p" | cut -d' ' -f1)
+  if [[ $got == "$len" && -n $want_h && $got_h == "$want_h" ]]; then echo "$got_h" > "$p.ok"; return 0; fi
+  echo "xfer: part $i failed: $got/$len B, hash ${got_h:0:12} vs ${want_h:0:12}" >&2
+  return 1
+}
+
+cmd_get() {
+  local n=8 o OPTIND=1
+  while getopts n: o; do case $o in n) n=$OPTARG ;; *) die 2 "usage: xfer get [-n STREAMS] HOST:/abs/file LOCAL" ;; esac; done
+  shift $((OPTIND - 1))
+  (( $# == 2 )) || die 2 "usage: xfer get [-n STREAMS] HOST:/abs/file LOCAL"
+  [[ $n =~ ^[1-9][0-9]*$ ]] || die 2 "STREAMS must be a positive integer"
+  split_spec "$1"; LOCAL=$2
+  [[ -e $LOCAL ]] && die 2 "refusing to overwrite $LOCAL"
+  PARTS="$LOCAL.parts"; mkdir -p "$PARTS"
+
+  SIZE=$(remote "$HOST" "stat -c %s $(rq "$RPATH")" < /dev/null | tail -n1) || true
+  [[ $SIZE =~ ^[0-9]+$ ]] || die 3 "could not stat $HOST:$RPATH"
+  CH=$(( (SIZE + n - 1) / n )); CH=$(( (CH + 1048575) / 1048576 * 1048576 )); (( CH > 0 )) || CH=1048576
+  local np=$(( (SIZE + CH - 1) / CH )); (( np > 0 )) || np=1
+  echo "xfer: $SIZE B in $np part(s), host $HOST" >&2
+
+  local hash_pid=""
+  if [[ -z ${XFER_NOFULLHASH:-} && ! -s $PARTS/remote.sha256 ]]; then
+    ( remote "$HOST" "sha256sum $(rq "$RPATH")" < /dev/null | tail -n1 | cut -d' ' -f1 > "$PARTS/remote.sha256.tmp" \
+        && mv "$PARTS/remote.sha256.tmp" "$PARTS/remote.sha256" ) & hash_pid=$!
+  fi
+
+  local t0 try i pid bad=0 pids
+  t0=$(date +%s)
+  for ((try = 0; try <= RETRIES; try++)); do
+    pids=(); for ((i = 0; i < np; i++)); do get_part "$i" & pids+=($!); done
+    bad=0; for pid in "${pids[@]}"; do wait "$pid" || bad=$((bad + 1)); done
+    (( bad == 0 )) && break
+    (( try < RETRIES )) && echo "xfer: retry $((try + 1)): $bad part(s) failed" >&2
+  done
+  if (( bad )); then
+    [[ -n $hash_pid ]] && { kill "$hash_pid" 2>/dev/null || true; }
+    die 4 "$bad part(s) still bad after $RETRIES retries, verified parts kept in $PARTS"
+  fi
+  local dt=$(( $(date +%s) - t0 )); (( dt > 0 )) || dt=1
+  echo "xfer: $SIZE B in $dt s = $(( SIZE / dt / 1000 )) kB/s" >&2
+
+  local tmp="$LOCAL.joining" lh rh
+  : > "$tmp"
+  for ((i = 0; i < np; i++)); do cat "$(printf '%s/p%04d' "$PARTS" "$i")" >> "$tmp"; done
+  [[ $(stat -c %s "$tmp") == "$SIZE" ]] || die 5 "joined size differs from $SIZE B, kept $tmp"
+  lh=$(sha256sum "$tmp" | cut -d' ' -f1)
+  if [[ -z ${XFER_NOFULLHASH:-} ]]; then
+    [[ -n $hash_pid ]] && { wait "$hash_pid" || true; }
+    rh=$(cat "$PARTS/remote.sha256" 2>/dev/null || true)
+    [[ $rh == "$lh" ]] || die 6 "whole-file hash mismatch: local $lh, remote ${rh:-none}, kept $tmp"
+  fi
+  mv "$tmp" "$LOCAL"
+  echo "$lh  $(basename "$LOCAL")" > "$LOCAL.sha256"
+  rm -rf -- "$PARTS"
+  echo "OK $LOCAL sha256 $lh"
+}
+
+cmd_many() {
+  local p=8 o OPTIND=1
+  while getopts P: o; do case $o in P) p=$OPTARG ;; *) die 2 "usage: xfer many [-P PARALLEL] HOST LIST LOCAL_DIR" ;; esac; done
+  shift $((OPTIND - 1))
+  (( $# == 3 )) || die 2 "usage: xfer many [-P PARALLEL] HOST LIST LOCAL_DIR"
+  [[ $p =~ ^[1-9][0-9]*$ ]] || die 2 "PARALLEL must be a positive integer"
+  local host=$1 list=$2 out=$3 dups
+  [[ -f $list ]] || die 2 "no list file $list"
+  if grep -v '^[[:space:]]*$' "$list" | grep -qv '^/'; then die 2 "every line of $list must be an absolute path"; fi
+  dups=$(grep -v '^[[:space:]]*$' "$list" | xargs -d '\n' -n1 basename | sort | uniq -d)
+  [[ -z $dups ]] || die 2 "duplicate basenames: $dups"
+  mkdir -p "$out"
+  local t0 rc=0; t0=$(date +%s)
+  export XFER_SELF="$0" XFER_HOST="$host" XFER_OUT="$out"
+  grep -v '^[[:space:]]*$' "$list" | xargs -d '\n' -P "$p" -I{} bash -c '
+    f=$1; o="$XFER_OUT/$(basename "$f")"
+    if [[ -e $o && -s $o.sha256 ]]; then echo "skip $o"; exit 0; fi
+    if XFER_NOFULLHASH=1 "$XFER_SELF" get -n 1 "$XFER_HOST:$f" "$o" > /dev/null 2> "$o.log"; then rm -f "$o.log"; echo "OK $o"
+    else echo "FAILED $f (see $o.log)"; exit 1; fi' _ {} || rc=$?
+  echo "xfer: elapsed $(( $(date +%s) - t0 )) s" >&2
+  (( rc == 0 )) || die 4 "some files failed"
+}
+
+cmd_put() {
+  (( $# == 2 )) || die 2 "usage: xfer put LOCAL_FILE HOST:/abs/file"
+  local lf=$1 lh rh tmp try out
+  [[ -f $lf ]] || die 2 "no local file $lf"
+  split_spec "$2"; tmp="$RPATH.xfer-partial"
+  if [[ $(remote "$HOST" "test -e $(rq "$RPATH") && echo EXISTS || echo FREE" < /dev/null | tail -n1) != FREE ]]; then
+    die 7 "$HOST:$RPATH exists (or the host did not answer)"
+  fi
+  lh=$(sha256sum "$lf" | cut -d' ' -f1)
+  for ((try = 0; try <= RETRIES; try++)); do
+    out=$(remote "$HOST" "cat > $(rq "$tmp") && sha256sum $(rq "$tmp")" < "$lf" || true)
+    rh=$(grep -Eo '^[0-9a-f]{64}' <<< "$out" | tail -n1 || true)
+    if [[ $rh == "$lh" ]]; then
+      [[ $(remote "$HOST" "test ! -e $(rq "$RPATH") && mv $(rq "$tmp") $(rq "$RPATH") && echo MOVED" < /dev/null | tail -n1) == MOVED ]] \
+        || die 7 "$HOST:$RPATH appeared during the upload, kept $tmp"
+      echo "OK $HOST:$RPATH sha256 $lh"; return 0
+    fi
+    (( try < RETRIES )) && echo "xfer: upload hash mismatch, retry $((try + 1))" >&2
+  done
+  remote "$HOST" "rm -f $(rq "$tmp")" < /dev/null || true
+  die 6 "upload of $lf failed hash checks $((RETRIES + 1)) times"
+}
+
+case ${1:-} in
+  get) shift; cmd_get "$@" ;;
+  many) shift; cmd_many "$@" ;;
+  put) shift; cmd_put "$@" ;;
+  -h|--help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

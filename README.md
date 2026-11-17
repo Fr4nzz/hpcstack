@@ -49,7 +49,8 @@ Without a profile, the skills run a short read-only discovery and ask you to con
 
 ## Status
 
-Version 0.2. Tested on real LSF jobs: `hpc-session` (CPU and GPU queues, including a busy GPU with idle CPU),
+Version 0.2. `xfer` (get, many, put) was tested on a real cluster through a Teleport proxy, with hashes checked.
+Tested on real LSF jobs: `hpc-session` (CPU and GPU queues, including a busy GPU with idle CPU),
 `hpc-probe` (a real `bsub -Is` on a CPU queue), `jobeff`, `quota_report.sh`, and `queue_worker.py` (failing,
 timed-out and crashing tasks, `preempt`, idle exit, STOP, `bkill`, `bkill -s USR2`, one worker per scenario). Tested
 only with fake commands or synthetic inputs: `pendlog`, `pend-risk`, `listing_job.sh`, `analyse_listing.py`,

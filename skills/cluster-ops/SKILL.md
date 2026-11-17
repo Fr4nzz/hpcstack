@@ -173,7 +173,8 @@ originals. Log every deletion, never touch other users' files, and report the qu
 delete the source data of a trained or deployed model: pack it under a permanent folder with a README. More:
 `references/storage.md`.
 
-A transfer can arrive silently truncated: compare `sha256sum` on both sides. Check an exact path with `stat` before
+Move files with `scripts/xfer`: parallel, SHA-256 checked ssh streams, several times faster than `scp` on a long
+path (`references/storage.md`). A transfer can arrive silently truncated: compare `sha256sum` on both sides. Check an exact path with `stat` before
 concluding a file is missing. Over ssh (`ssh host 'tar -c ...' > file`), stdout must carry only the stream.
 
 ## Recover
