@@ -55,6 +55,8 @@ bsub -q <gpu-queue> -n 4 -M 16000 -gpu "num=1" -W 8:00 -o q/worker.%J.out \
 ```
 
 - If the agent dies, the worker finishes the queue and exits after 25 idle minutes.
+- Submit any GPU batch run you might extend as a worker, even with one task: `add` queues the next run in the
+  same allocation while it runs. A plain batch job cannot take more work.
 - `touch q/STOP` makes workers finish their current task and exit. The file stays: remove it before you
   submit the next worker on that queue, or that worker exits at once (`status` prints "STOP file present").
 - The worker exits 0 when it stops normally (idle, max-hours, STOP), even if tasks failed: read
@@ -94,9 +96,10 @@ scripts/queue_worker.py preempt --queue q/ --task w04_full --reason "ablation de
 - The preempted run loses the work since its last checkpoint. Without `--resume-cmd` it restarts from scratch.
 - A task is preempted at most twice. `preempt` prints the worker's time left and warns when a high task's
   `--est-min` does not fit. `bkill` or USR2 on the worker still stops everything.
-- Use only your own queue and jobs, hold no idle allocations, and keep the idle exit on. Reuse an allocation only
-  for work that its queue, resource request and site policy allow. Never extend or renew an allocation, or keep
-  it busy, just to keep the slot.
+- Use only your own queue and jobs and keep the idle exit on. A short idle gap is fine when the next task is
+  minutes away and a new submission would wait longer. Reuse an allocation only for work that its queue, resource
+  request and site policy allow. Never extend or renew an allocation, hold it through an agent pause, or keep it
+  busy just to keep the slot.
 
 ## Attribution
 
