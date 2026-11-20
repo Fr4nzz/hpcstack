@@ -68,6 +68,7 @@ print(json.dumps({"COMMAND": "bjobs", "JOBS": len(recs), "RECORDS": recs}))
     "bhist": r'''
 import json, os, sys
 open(os.environ["FAKE_STATE"] + ".bhist_args", "a").write(" ".join(sys.argv[1:]) + "\n")
+import time; time.sleep(json.load(open(os.environ["FAKE_STATE"])).get("bhist_sleep", 0))
 if json.load(open(os.environ["FAKE_STATE"])).get("bhist_none"):
     sys.stderr.write("No matching job found\n")
     sys.exit(255)
@@ -607,3 +608,110 @@ def test_started_skips_jobs_checked_recently(lsf):
     assert len(ev) == 1 and "all checked in the last 600 s" in r.stdout
     run(lsf, PENDLOG, "started", "--out", str(lsf["out"]), "--every", "0")
     assert len([e for e in jsonl(lsf["out"] / "jobs.jsonl") if e["kind"] == "started"]) == 2
+
+
+# ---------------------------------------------------------------- 20 Nov 2026: load counts, outcomes, dependencies
+def test_gpu_memory_from_model_name():
+    mod = _load_pendlog()
+    got = [mod.gpu_mem_from_model(m) for m in ("NVIDIAA100_SXM4_80GB", "TeslaV100_SXM2_32GB",
+                                                "NVIDIAH10080GBHBM3", "NVIDIAH200_141GB", "NVIDIA")]
+    assert got == [80, 32, 80, 141, None]  # the H100 name once read as 10080 GB, so it always fit
+
+
+def test_snapshot_counts_gpus_that_could_take_it(lsf):
+    for req, want in (("-n 4 -gpu 'num=1:gmem=40G'", (2, 1, 2)), ("-gpu 'num=1:gmem=8G'", (3, 2, 3)),
+                      ("-gpu 'num=1:gmem=8G:gmodel=NVIDIAH10080GBHBM3'", (0, 0, 0))):
+        run(lsf, PENDLOG, "snapshot", "--queue", "gpu", "--hosts-from-request", req, "--out", str(lsf["out"]))
+        s = jsonl(lsf["out"] / "snapshots.jsonl")[-1]
+        assert (s["gpus_capable"], s["gpus_idle"], s["gpus_free_mem"]) == want, req
+    big = next(h for h in s["gpu_hosts"] if h["host"] == "big-01")
+    assert big["gpus"][1] == ["NVIDIAA100_SXM4_80GB", 80, 50, 1, 10]  # model, GB, MRSV, jobs, MUSED
+
+
+def test_export_load_columns(lsf):
+    submit(lsf, "bsub", "-q", "gpu", "-n", "4", "-gpu", "num=1:gmem=40G", "x")
+    (row,) = csv.DictReader(io.StringIO(run(lsf, PENDLOG, "export", "--out", str(lsf["out"])).stdout))
+    assert (row["snap_gpus_capable"], row["snap_gpus_idle"], row["snap_gpus_free_mem"]) == ("2", "1", "2")
+    assert row["dependency"] == "0"
+
+
+def lsf_report(job_id, sub_ts, start_ts):
+    fmt = lambda t: time.strftime("%a %b %d %H:%M:%S %Y", time.localtime(t))
+    return (f"training output\n------\nSender: LSF System <lsfadmin@node>\n"
+            f"Subject: Job {job_id}: <name> in cluster <c> Done\n\n"
+            f"Job <name> was submitted from host <head> by user <tester> in cluster <c> at {fmt(sub_ts)}\n"
+            f"Job was executed on host(s) <4*node>, in queue <gpu>, as user <tester> in cluster <c> at {fmt(start_ts)}\n"
+            f"Started at {fmt(start_ts)}\nTerminated at {fmt(start_ts + 50)}\n"
+            "The output (if any) is above this job summary.\n")
+
+
+def test_started_reads_the_jobs_output_file(lsf):
+    logdir = lsf["tmp"] / "logs"
+    logdir.mkdir()
+    submit(lsf, "bsub", "-q", "gpu", "-o", f"{logdir}/job.%J.out", "x")
+    sub = jsonl(lsf["out"] / "jobs.jsonl")[-1]
+    (logdir / "job.4242.out").write_text(lsf_report("9999", sub["ts"], sub["ts"] + 1) +
+                                        lsf_report("4242", sub["ts"], sub["ts"] + 125))
+    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]), "--every", "0")  # bjobs no longer knows it
+    ev = jsonl(lsf["out"] / "jobs.jsonl")[-1]
+    assert (ev["source"], ev["started"], ev["final"], ev["pend_s"]) == ("output_file", True, True, 125)
+    assert not (lsf["state"].parent / "state.json.bhist_args").exists()  # no bhist needed
+    (row,) = csv.DictReader(io.StringIO(run(lsf, PENDLOG, "export", "--out", str(lsf["out"])).stdout))
+    assert (row["pend_s"], row["outcome_source"]) == ("125", "output_file")
+
+
+def test_output_file_of_another_job_is_ignored(lsf):
+    logdir = lsf["tmp"] / "logs"
+    logdir.mkdir()
+    submit(lsf, "bsub", "-q", "gpu", "-o", f"{logdir}/same.out", "x")
+    sub = jsonl(lsf["out"] / "jobs.jsonl")[-1]
+    # same id, but submitted a month earlier: a wrapped job id
+    (logdir / "same.out").write_text(lsf_report("4242", sub["ts"] - 30 * 86400, sub["ts"] - 30 * 86400 + 5))
+    set_state(lsf, bhist_none=True)
+    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]), "--every", "0")
+    ev = jsonl(lsf["out"] / "jobs.jsonl")[-1]
+    assert ev.get("source") is None and not ev["final"] and ev["tries"] == 1
+
+
+def test_bhist_timeout_counts_as_a_try(lsf):
+    submit(lsf, "bsub", "-q", "gpu", "x")
+    set_state(lsf, bhist_sleep=5)
+    for _ in range(3):
+        run(lsf, PENDLOG, "--timeout", "1", "started", "--out", str(lsf["out"]), "--every", "0")
+    ev = [e for e in jsonl(lsf["out"] / "jobs.jsonl") if e["kind"] == "started"]
+    assert [(e["final"], e["tries"]) for e in ev] == [(False, 1), (True, 2)]
+    assert "bhist: timeout" in ev[0]["errors"]
+
+
+def test_reused_job_id_is_a_new_job(lsf):
+    submit(lsf, "bsub", "-q", "gpu", "x")
+    set_state(lsf, jobs={"4242": [{"JOBID": "4242", "STAT": "RUN", "START_TIME": "Nov  6 10:42", "PEND_TIME": "30",
+                                   "PEND_REASON": ""}]})
+    run(lsf, PENDLOG, "started", "--out", str(lsf["out"]), "--every", "0")
+    submit(lsf, "bsub", "-q", "gpu", "-gpu", "num=1:gmem=40G", "y")  # LSF gave out 4242 again
+    set_state(lsf, jobs={"4242": [{"JOBID": "4242", "STAT": "PEND", "START_TIME": "", "PEND_TIME": "700",
+                                   "PEND_REASON": ""}]})
+    r = run(lsf, PENDLOG, "started", "--out", str(lsf["out"]), "--every", "0")
+    assert "1 checked now" in r.stdout
+    (row,) = csv.DictReader(io.StringIO(run(lsf, PENDLOG, "export", "--out", str(lsf["out"])).stdout))
+    assert (row["gmem_gb"], row["started"], row["pend_s"]) == ("40.0", "0", "700")
+
+
+def test_dependency_jobs_are_left_out_of_risk(lsf):
+    submit(lsf, "bsub", "-q", "gpu", "-w", "done(1)", "-gpu", "num=1:gmem=40G", "x")
+    (row,) = csv.DictReader(io.StringIO(run(lsf, PENDLOG, "export", "--out", str(lsf["out"])).stdout))
+    assert row["dependency"] == "1"
+    hist = lsf["tmp"] / "h.csv"
+    cols = EXPORT_COLS + ["request", "dependency"]
+    with open(hist, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=cols)
+        w.writeheader()
+        base = {"queue": "gpu", "gmem_gb": 40, "pin": 0, "started": 1, "pend_censored": 0}
+        for i in range(3):
+            w.writerow(dict(base, job_id=i, submit_ts=NOW - 3600, pend_s=60, request="bsub -q gpu x", dependency=0))
+        w.writerow(dict(base, job_id=10, submit_ts=NOW - 3600, pend_s=90000, request="bsub -q gpu x", dependency=1))
+        # an export written before the column existed: read -w from the request
+        w.writerow(dict(base, job_id=11, submit_ts=NOW - 3600, pend_s=90000,
+                        request="bsub -q gpu -w 'done(5)' x", dependency=""))
+    out = pend_risk(lsf, hist, "-q gpu -gpu num=1:gmem=40G").stdout
+    assert "Of 3 similar jobs in the last 4 weeks, 0 of the 3" in out

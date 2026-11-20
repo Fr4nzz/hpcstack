@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """pendlog: log queue snapshots and your own PEND times, so wait risk can be judged from data later.
 
-UNTESTED on a real cluster: tested only with fake bqueues/bhosts/bjobs/bhist/bsub (tests/test_pendlog.py).
+Logged about 540 real submits on one LSF cluster over two weeks (Nov 2026). The output-file fallback, the GPU
+counts, the dependency flag and the job-id reuse rule are tested only with fakes (tests/test_pendlog.py).
 
 Usage:
   pendlog snapshot --queue Q [--hosts-from-request "<bsub -R/-gpu/-n args>"] --out DIR
@@ -11,8 +12,11 @@ Usage:
 
 snapshot  Runs light commands only, each with a timeout (--timeout, default 20 s): `bqueues Q`,
           `bhosts -gpu -w` and `bhosts -w <gpu hosts>` when the request asks for a GPU, your own RUN and
-          PEND counts from `bjobs -u $USER`, and your fairshare line from `bqueues -r Q`. Appends one JSON
-          line to DIR/snapshots.jsonl. It never fails: errors go into the line's "errors" list, exit 0.
+          PEND counts from `bjobs -u $USER`, and your fairshare line from `bqueues -r Q`. For a GPU request
+          it also counts the GPUs that could take it: gpus_capable (open host, model and memory size fit),
+          gpus_idle (of those, no job on the GPU and enough free slots) and gpus_free_mem (model memory
+          minus MUSED covers the request, and enough free slots). Appends one JSON line to
+          DIR/snapshots.jsonl. It never fails: errors go into the line's "errors" list, exit 0.
 submit    Takes a snapshot (or reuses one under 60 s old for the same queue and shape, and spends at most
           about 10 s on it), runs the bsub command, records the job id and the full request in
           DIR/jobs.jsonl, and exits with the command's exit code (128 + N if killed by signal N). Its
@@ -28,17 +32,24 @@ started   For logged jobs with no start yet (submitted in the last --since hours
           state, start time, PEND seconds and pending reason with one
           `bjobs -o "jobid jobindex stat submit_time start_time pend_time pend_reason" -json` call, falling
           back to `bhist -n 3 -l` for purged jobs (a job that neither knows in 2 tries is marked
-          final, as unknown; a failed or timed-out command logs "scheduler unavailable" and is no try). Appends one line per job to DIR/jobs.jsonl. Schedule it
+          final, as unknown; a failed bjobs logs "scheduler unavailable" and is no try, a bhist timeout after
+          bjobs answered is one). Before bhist it reads the LSF report at the end of the job's own -o file
+          (absolute path, %J filled in, not for %I arrays): "Started at" minus "submitted at" (source
+          "output_file"). That wait includes any time the job was held with bstop. Appends one line per job
+          to DIR/jobs.jsonl. Schedule it
           every 10 to 15 min while jobs pend, or call it from a wait loop.
           A job is checked until a run records its start or end, then never again, so its start shows in
           `export`, not in later summaries. A job checked less than --every seconds ago (default 600) is
           skipped, so calling it from a 1-min wait loop costs one bjobs call per 10 min per job.
 export    One CSV row per logged job: the request, the snapshot at submit, PEND seconds and the last
-          pending reason. Feed it to `pend-risk --history`.
+          pending reason. The column dependency is 1 for jobs submitted with -w or -b, whose wait includes
+          the dependency or begin time: `pend-risk` leaves them out. Feed it to `pend-risk --history`.
+          A reused job id (LSF ids wrap) starts a new job: earlier records of that id are not joined to it.
 
 Units: -M and gmem without a unit are read as MB. GPU memory is reported in GiB (MB / 1024), so gmem=32G
 is 32. Host fitting is approximate: free slots from bhosts, free GPU memory = memory in the model name
-(e.g. ..._80GB) minus MRSV.
+(e.g. ..._80GB, and 80 for NVIDIAH10080GBHBM3) minus MRSV. Each stored GPU is [model, GB, MRSV GB, jobs,
+MUSED GB].
 """
 import argparse
 import csv
@@ -113,7 +124,7 @@ def parse_request(args):
         args = args[1:]
     r = {"queue": None, "cores": None, "mem_mb": None, "gpu_num": None, "gmem_gb": None, "gmodel": "",
          "j_exclusive": False, "pin": False, "host_incl": [], "host_excl": [], "array_size": 1,
-         "runlimit": None, "resreq": [], "flags": []}
+         "runlimit": None, "resreq": [], "flags": [], "dependency": False}
     i = 0
     while i < len(args):
         a = args[i]
@@ -136,8 +147,12 @@ def parse_request(args):
             r["mem_mb"] = mem_mb(val)
         elif a == "-W":
             r["runlimit"] = val
+        elif a in ("-w", "-b"):
+            r["dependency"] = True  # the wait then includes the dependency or the begin time
         elif a == "-m":
             r["host_incl"] += str(val).split()
+        elif a in ("-o", "-oo"):
+            r["outfile"] = val
         elif a == "-J":
             m = re.search(r"\[(.*?)\]", str(val))
             if m:
@@ -225,8 +240,15 @@ def to_int(x):
 
 
 def gpu_mem_from_model(model):
+    """'NVIDIAA100_SXM4_80GB' -> 80. In 'NVIDIAH10080GBHBM3' the model number runs into the size: 80."""
     m = re.search(r"(\d+)\s*GB", str(model), re.I)
-    return float(m.group(1)) if m else None
+    if not m:
+        return None
+    d = m.group(1)
+    for k in (3, 2, 1):
+        if len(d) >= k and 0 < int(d[-k:]) <= 256:
+            return float(int(d[-k:]))
+    return None
 
 
 def parse_bhosts_gpu(text):
@@ -253,8 +275,7 @@ def host_fits(req, host, gpus, slots):
     """Can this host take the shape now? Approximate. None if unknown."""
     if host in req.get("host_excl", []) or (req.get("host_incl") and host not in req["host_incl"]):
         return False
-    gm = req.get("gmodel") or ""
-    if gm and gm.upper() != "NVIDIA" and not all(g["model"] in gm or gm in g["model"] for g in gpus[:1]):
+    if not model_ok(req, gpus):
         return False
     if slots is not None:
         if slots.get("status") not in ("ok", None):
@@ -273,6 +294,30 @@ def host_fits(req, host, gpus, slots):
                 continue
         free += 1
     return free >= need
+
+
+def model_ok(req, gpus):
+    gm = req.get("gmodel") or ""
+    return not (gm and gm.upper() != "NVIDIA" and not all(g["model"] in gm or gm in g["model"] for g in gpus[:1]))
+
+
+def gpu_counts(req, gpu_hosts, slots):
+    """GPUs that could take the request: capable at all, idle now, with enough unused memory now."""
+    need = req.get("gmem_gb") or 0
+    c = {"gpus_capable": 0, "gpus_idle": 0, "gpus_free_mem": 0}
+    for h, gpus in gpu_hosts.items():
+        sl = slots.get(h) or {}
+        if (h in req.get("host_excl", []) or (req.get("host_incl") and h not in req["host_incl"])
+                or sl.get("status") not in ("ok", None) or not model_ok(req, gpus)):
+            continue
+        room = sl.get("free") is None or sl["free"] >= (req.get("cores") or 1)
+        for g in gpus:
+            if g.get("mem_gb") is None or g["mem_gb"] < need:
+                continue
+            c["gpus_capable"] += 1
+            c["gpus_idle"] += bool(room and not g.get("njobs"))
+            c["gpus_free_mem"] += bool(room and g["mem_gb"] - g.get("mused_gb", 0) >= max(need, 1))
+    return c
 
 
 def snapshot_lsf(queue, req, errors, user):
@@ -312,10 +357,15 @@ def snapshot_lsf(queue, req, errors, user):
             fit = host_fits(req, h, gpus, slots.get(h))
             hosts.append({"host": h, "status": (slots.get(h) or {}).get("status"),
                           "free_slots": (slots.get(h) or {}).get("free"), "fits": fit,
-                          "gpus": [[g["model"], g["mem_gb"], g["mrsv_gb"], g["njobs"]] for g in gpus]})
+                          "gpus": [[g["model"], g["mem_gb"], g["mrsv_gb"], g["njobs"], g["mused_gb"]]
+                                   for g in gpus]})
         s["gpu_hosts"] = hosts
         s["hosts_total"] = len(hosts)
         s["hosts_fit"] = sum(1 for h in hosts if h["fits"])
+        try:
+            s.update(gpu_counts(req, gpu_hosts, slots))
+        except Exception as e:  # a count is optional: never lose the snapshot over it
+            errors.append(f"gpu counts: {type(e).__name__}")
     return s
 
 
@@ -570,7 +620,12 @@ def lsf_bhist(job_id, errors):
     try:
         p = subprocess.run(["bhist", "-n", "3", "-l", job_id], capture_output=True, text=True,
                            timeout=TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired) as e:
+    except subprocess.TimeoutExpired:
+        # bjobs answered, so the scheduler is up: bhist is just slow over its event files. Count a try,
+        # or each run spends the full timeout on this job again for --since hours.
+        errors.append("bhist: timeout")
+        return None, True
+    except OSError as e:
         errors.append(f"bhist: {type(e).__name__}")
         return None, False
     flat = " ".join((p.stdout + " " + p.stderr).split())
@@ -586,6 +641,57 @@ def lsf_bhist(job_id, errors):
             "pend_s": pend, "pend_reason": "", "start_time_raw": "", "source": "bhist"}, True
 
 
+def report_times(text, job_id):
+    """LSF job report(s) in an output file -> (submit epoch, start epoch, start text, DONE/EXIT) of the last
+    report for this job id, or None. The report's times are the cluster's local time."""
+    found, cur = None, None
+    for ln in text.splitlines():
+        m = re.match(r"Subject: Job (\d+)(?:\[\d+\])?: .* (Done|Exited)\s*$", ln)
+        if m:
+            cur = {"id": m.group(1), "stat": "DONE" if m.group(2) == "Done" else "EXIT"}
+            continue
+        if cur is None or cur["id"] != job_id:
+            continue
+        m = re.search(r"was submitted from .* at (\w{3} \w{3} +\d+ [\d:]+ \d{4})\s*$", ln) or \
+            re.match(r"(Started) at (.+?)\s*$", ln)
+        try:
+            if m and m.group(1) == "Started":
+                cur["start_raw"] = m.group(2)
+                cur["start"] = time.mktime(time.strptime(" ".join(m.group(2).split()), "%a %b %d %H:%M:%S %Y"))
+            elif m:
+                cur["sub"] = time.mktime(time.strptime(" ".join(m.group(1).split()), "%a %b %d %H:%M:%S %Y"))
+        except ValueError:
+            continue
+        if "sub" in cur and "start" in cur:
+            found = (cur["sub"], cur["start"], cur["start_raw"], cur["stat"])
+    return found
+
+
+def outfile_status(sub, job_id):
+    """Read the LSF report at the end of the job's own -o file. -> observation or None. Cheap: one small read."""
+    req = sub.get("request") or {}
+    if "outfile" not in req:  # logged before the field existed
+        req = parse_request([x for x in sub.get("request_args") or [] if x != "<stdin>"])
+    path = req.get("outfile")
+    if not path or (req.get("array_size") or 1) > 1 or "%I" in path:
+        return None
+    path = path.replace("%J", job_id)
+    if not os.path.isabs(path):
+        return None
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 65536))
+            text = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    t = report_times(text, job_id)
+    if not t or abs(t[0] - sub.get("ts", 0)) > 300:  # another job's report, e.g. a wrapped job id
+        return None
+    return {"elements": 1, "started": True, "stats": [t[3]], "pend_s": int(t[1] - t[0]), "pend_reason": "",
+            "start_time_raw": t[2], "source": "output_file"}
+
+
 def job_events(out_dir):
     submits, last = {}, {}
     for r in read_jsonl(os.path.join(out_dir, "jobs.jsonl")):
@@ -594,6 +700,7 @@ def job_events(out_dir):
             continue
         if r.get("kind") == "submit":
             submits[jid] = r
+            last[jid] = []  # LSF job ids wrap: a new submit with an old id starts afresh
         elif r.get("kind") == "started":
             last.setdefault(jid, []).append(r)
     return submits, last
@@ -624,6 +731,14 @@ def cmd_started(a):
     for j in todo:
         answered[j] = ok
         if ok and j not in obs:
+            o = None
+            try:
+                o = outfile_status(submits[j], j)
+            except Exception as e:  # a fallback only: never stop the run over it
+                errors.append(f"output file: {type(e).__name__}")
+            if o:
+                obs[j] = o
+                continue
             h, answered[j] = lsf_bhist(j, errors)
             if h:
                 obs[j] = h
@@ -660,7 +775,8 @@ EXPORT_COLS = ["job_id", "submit_ts", "submit_utc", "queue", "cores", "mem_mb", 
                "pin", "j_exclusive", "array_size", "host_incl", "host_excl", "runlimit", "request",
                "snap_queue_pend", "snap_queue_run", "snap_own_run_q", "snap_own_pend_q", "snap_hosts_fit",
                "snap_hosts_total", "snap_fairshare_priority", "snap_errors", "started", "pend_s",
-               "pend_censored", "last_stat", "pend_reason", "last_checked_ts"]
+               "pend_censored", "last_stat", "pend_reason", "last_checked_ts", "dependency", "snap_gpus_capable",
+               "snap_gpus_idle", "snap_gpus_free_mem", "outcome_source"]
 
 
 def cmd_export(a):
@@ -680,6 +796,12 @@ def cmd_export(a):
         # an outage or not-found record has no pend_s or stat: use the last record that does
         last = next((o for o in reversed(obs) if o.get("pend_s") is not None or o.get("stat")), obs[-1] if obs else {})
         reason = next((o.get("pend_reason") for o in reversed(obs) if o.get("pend_reason")), "")
+        dep = req.get("dependency")
+        if dep is None:  # logged before the field existed
+            try:
+                dep = parse_request([x for x in s.get("request_args") or [] if x != "<stdin>"])["dependency"]
+            except Exception:
+                dep = False
         pend = st.get("pend_s") if st else last.get("pend_s")
         w.writerow({
             "job_id": jid, "submit_ts": s.get("ts"),
@@ -696,7 +818,10 @@ def cmd_export(a):
             "snap_fairshare_priority": snap.get("fairshare_priority"),
             "snap_errors": "; ".join(snap.get("errors") or []),
             "started": int(bool(st)), "pend_s": pend, "pend_censored": int(not st and pend is not None),
-            "last_stat": last.get("stat", ""), "pend_reason": reason, "last_checked_ts": last.get("ts", "")})
+            "last_stat": last.get("stat", ""), "pend_reason": reason, "last_checked_ts": last.get("ts", ""),
+            "dependency": int(bool(dep)), "snap_gpus_capable": snap.get("gpus_capable"),
+            "snap_gpus_idle": snap.get("gpus_idle"), "snap_gpus_free_mem": snap.get("gpus_free_mem"),
+            "outcome_source": (st or last).get("source", "")})
     return 0
 
 

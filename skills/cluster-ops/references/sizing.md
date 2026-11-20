@@ -56,6 +56,19 @@ jobs found no model that caught any GPU-queue wait over 1 h. The request still c
 - Cutting cores had no average effect. It helps only when the pending reason says the fitting hosts lack cores.
 - Model or host pins shrink the eligible hosts. Drop a pin the job does not need.
 
+A second check, on two weeks of `pendlog` data (241 GPU-queue jobs in 139 bursts, trained on the earlier days and
+tested on the later ones), agreed:
+
+- A table of median and 90th-percentile waits by GPU-memory class and pin did not beat the overall median. Its
+  median error was 6 to 22 min against 5 min, and only 60 to 75 % of the later waits fell under its 90th
+  percentile.
+- Queue PEND and RUN counts, our own jobs and the fairshare priority at submit had no useful link to the wait. The
+  queue's pending count fell from about 20,000 to 1,000 in those weeks with no matching change in waits.
+- The risk class held up. Requests above 32G pinned to the largest GPU model waited a median of 1 to 2 h, half of
+  them over 1 h, while the rest mostly started within minutes. The CPU queue started almost every job at once.
+- Clean the history first. A job submitted with `-w` or `-b` waits for its dependency, and a job held with `bstop`
+  shows the hold as waiting in its own LSF report. `pend-risk` leaves out `-w` and `-b` jobs.
+
 Submit through `scripts/pendlog submit --out DIR -- bsub ...` (when to run `pendlog started`: `monitoring.md`).
 Before a batch, `scripts/pend-risk --history jobs.csv --request "<bsub args>"` prints how often similar recent
 jobs waited over 1 h, never an ETA. The history is `pendlog export` output or an accounting CSV.

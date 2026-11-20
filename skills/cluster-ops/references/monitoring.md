@@ -44,6 +44,8 @@ What the output means:
   handoff, and never re-arm it as a new background loop.
 - Jobs submitted through `scripts/pendlog submit`: run `pendlog started --out DIR` every 10 to 15 min, or from
   the wait loop (it re-checks a job at most every 10 min), so their start, PEND and pending reason are logged.
+  Once LSF has forgotten a job, `started` reads the LSF report at the end of its `-o` file, so give batch jobs
+  an absolute `-o` path.
 - `ZOMBI`: report once and read `bacct`. Don't re-run the loop on it.
 - `CAP_REACHED`: the loop hit its own limit before the job changed state. Hand off to a watcher (state file
   and job file) instead of starting another background loop. A foreground loop may continue in the same turn with

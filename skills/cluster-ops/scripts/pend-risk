@@ -10,7 +10,8 @@ Usage:
 --history   `pendlog export` output, or an LSF accounting CSV with the columns job_id, array_idx, queue,
             status, submit_ts, start_ts, end_ts, pend_s, gpu_gmem_mb, gpu_gmodel, hname_rule (others ignored).
             Arrays count once, at their first element to start. Jobs killed while pending count as waits
-            over 1 h only if they had already waited that long.
+            over 1 h only if they had already waited that long. Jobs submitted with -w or -b (export column
+            dependency, or read from its request column) are left out: they wait for the dependency.
 --request   the bsub options, e.g. "-q gpu -n 4 -M 16000 -gpu 'num=1:gmem=40G'".
 
 Similar jobs: same queue, same GPU-memory class (above --gmem-threshold GiB, or at or below it / no GPU
@@ -21,7 +22,9 @@ if it is on PATH (skip with --no-live).
 
 Why no ETA: on one user's 10,490 LSF jobs, no model predicted waits over 1 h on a GPU queue (AUC about
 0.48), because cluster-wide load drives them and accounting does not keep it. The one robust signal was a
-GPU-memory request above the smallest large-GPU class (+28 points in the chance of waiting over 1 h).
+GPU-memory request above the smallest large-GPU class (+28 points in the chance of waiting over 1 h). Two later
+weeks of pendlog data agreed: a median and 90th-percentile table by GPU-memory class and pin did not beat the
+overall median on held-out days, and queue load at submit showed no useful link to the wait.
 """
 import argparse
 import csv
@@ -64,7 +67,7 @@ def load_history(path):
         out = []
         for r in rows:
             w = num(r.get("pend_s"))
-            if w is None:
+            if w is None or depends(r):
                 continue
             out.append({"queue": r.get("queue") or "", "ts": num(r.get("submit_ts")) or 0,
                         "gmem_gb": num(r.get("gmem_gb")), "pin": str(r.get("pin")) in ("1", "True", "true"),
@@ -73,6 +76,16 @@ def load_history(path):
     if {"gpu_gmem_mb", "pend_s", "submit_ts", "queue", "job_id"} <= cols:
         return load_accounting(rows)
     raise SystemExit(f"pend-risk: {path}: neither pendlog export nor accounting CSV columns")
+
+
+def depends(r):
+    """Was the job submitted with a dependency (-w) or a begin time (-b)?"""
+    if r.get("dependency") not in (None, ""):
+        return str(r["dependency"]) in ("1", "True", "true")
+    try:
+        return bool(pendlog.parse_request(shlex.split(r.get("request") or ""))["dependency"])
+    except ValueError:
+        return False
 
 
 def load_accounting(rows):

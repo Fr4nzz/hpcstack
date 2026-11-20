@@ -55,8 +55,9 @@ Without a profile, the skills run a short read-only discovery and ask you to con
 Version 0.2. `xfer` (get, many, put) was tested on a real cluster through a Teleport proxy, with hashes checked.
 Tested on real LSF jobs: `hpc-session` (CPU and GPU queues, including a busy GPU with idle CPU),
 `hpc-probe` (a real `bsub -Is` on a CPU queue), `jobeff`, `quota_report.sh`, and `queue_worker.py` (failing,
-timed-out and crashing tasks, `preempt`, idle exit, STOP, `bkill`, `bkill -s USR2`, one worker per scenario). Tested
-only with fake commands or synthetic inputs: `pendlog`, `pend-risk`, `listing_job.sh`, `analyse_listing.py`,
+timed-out and crashing tasks, `preempt`, idle exit, STOP, `bkill`, `bkill -s USR2`, one worker per scenario). `pendlog`
+logged about 540 real submits over two weeks, and its newer parts (reading the job's own output file, GPU counts)
+are tested only with fake commands. Tested only with fake commands or synthetic inputs: `pend-risk`, `listing_job.sh`, `analyse_listing.py`,
 `results_tsv.py`, `plot_progress.py`, and in `queue_worker.py` the resume on the next worker, the USR2 grace and the
 `--est-min` fit check. Not yet tested: several workers sharing one queue. Reports of what breaks on your cluster are
 the most useful issues you can open.
