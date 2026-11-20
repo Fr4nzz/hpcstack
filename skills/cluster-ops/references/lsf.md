@@ -103,6 +103,26 @@ binding, a GPU-memory (`gmem`) filter that only the largest GPUs meet, the memor
 | exit 1 with "Successfully completed" never printed | the script failed, or its EXIT trap returned non-zero after the work. Read `.err` and the status file |
 | exit 141 | `SIGPIPE`: the script stopped at a `cmd \| head` under `pipefail`. Check whether the work after that line ran, then fix the pipe. Not a finished job |
 
+## Fairshare: who your jobs slow down
+
+Your usage lowers the priority of your whole group, but only inside one fairshare tree. Queues that share a tree
+are listed together, and CPU and GPU queues often have separate trees and separate hosts.
+
+```bash
+bqueues -l <queue> | grep -E 'FAIRSHARE_QUEUES|USER_SHARES|HOSTS'   # which queues share usage, which hosts
+bqueues -r <queue>                     # the share tree: priority, started slots and run time per group and user
+bhpart -r                              # host partitions, if the site uses them instead
+bmgroup -r <host_group>                # hosts in a group: do two queues overlap?
+bhosts -w | awk 'NR>1{n[$2]++} END{for(s in n) print s, n[s]}'      # hosts per state
+bugroup -l <group>                     # members and shares of your group
+```
+
+- If two queues list each other under `FAIRSHARE_QUEUES`, a job in one lowers your group's priority in both.
+- If they are in different sets and their host groups share no host, work in one cannot delay work in the other.
+- Inside a tree your jobs count against every member of your group, so right-size `-n`, cap arrays (`%N`) and
+  submit housekeeping at low priority (`-sp 1`).
+- `-sp` only reorders your own jobs. It does not give share back to your group.
+
 ## Job exceptions
 
 Some queues define an `IDLE` exception (cputime/runtime below a threshold). It is cumulative, only notifies, and

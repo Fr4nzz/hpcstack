@@ -28,6 +28,21 @@ Verify every limit on the cluster before relying on it.
 - Idle-job exceptions: `bqueues -l <queue> | grep -A2 -i idle`. They notify only and are not defined on every
   queue, so they are no substitute for `hpc-session` (`cluster-ops`).
 
+## Fairshare
+
+Checked read-only in November 2026 with the commands in `cluster-ops` `references/lsf.md`, "Fairshare".
+
+- Two cross-queue fairshare sets: the CPU queues (`normal`, `yesterday`, `basement`, `long`, `week`,
+  `checkpoint`) and the GPU queues (`gpu`, `gpu-basement`). Each set keeps its own usage counters.
+- The GPU queues dispatch only to GPU host groups, and the CPU queues never use those hosts. So GPU jobs do not
+  lower your group's CPU priority and cannot hold cores a CPU job is waiting for.
+- CPU-queue jobs do count against your whole group in the CPU set. Ask for the cores you use, cap arrays and
+  use `-sp 1` for housekeeping. Keep CPU-only stages out of GPU jobs.
+- No host partitions are defined (`bhpart` says so).
+- Snapshot, one weekday morning in November 2026, not a rule: `normal` had about 83,000 jobs pending against
+  5,900 running. Of 115 standard CPU hosts, 88 were full, 18 were closed by admins (mostly waiting for a reboot)
+  and the 5 open ones were nearly full. Slow CPU dispatch that day was cluster-wide, not one group's doing.
+
 ## Queues named in the public nf-core profile
 
 | Queue | Used by the nf-core profile for |
