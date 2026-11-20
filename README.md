@@ -4,8 +4,11 @@ Agent skills for shared LSF clusters: faster, cheaper, and fairer to everyone el
 
 These skills teach a coding agent (Claude Code, Codex, or anything that reads `SKILL.md`) to work on a shared batch
 cluster the way a careful colleague would. Jobs ask for what they use, measure before they optimise, clean up after
-themselves, and stop when their budget is spent. They were written and tested on the Wellcome Sanger Institute's
-farm22, and the rules come from real jobs there.
+themselves, and stop when their budget is spent. The rules come from real jobs on one cluster.
+
+**Tested on one cluster only:** the Wellcome Sanger Institute's farm22 (LSF). Nothing here has been tried on
+another site or scheduler, so expect to adjust queue names, limits and paths. `sites/TEMPLATE.md` is the place to
+start, and reports from other clusters are welcome.
 
 ## Skills
 
