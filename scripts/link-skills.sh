@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # link-skills.sh: symlink this repo's skills into agent skill folders, so `git pull` updates them.
 #
-#   scripts/link-skills.sh [--claude] [--codex] [--agents] [--dry-run] [--remove]
+#   scripts/link-skills.sh [--claude] [--codex] [--agents] [--antigravity] [--dry-run] [--remove]
 #
-# Targets: --claude ~/.claude/skills, --codex ~/.codex/skills, --agents ~/.agents/skills.
+# Targets: --claude ~/.claude/skills, --codex ~/.codex/skills, --agents ~/.agents/skills,
+# --antigravity ~/.gemini/antigravity-cli/skills.
 # No target flag = --claude. Existing non-symlink folders with the same name are never touched.
 # --remove deletes only symlinks that point into this repo. Both modes also delete dangling symlinks into this
 # repo's skills/ folder (skills that were removed or renamed), and leave every other link alone.
@@ -16,9 +17,10 @@ for a in "$@"; do
     --claude) TARGETS+=("$HOME/.claude/skills") ;;
     --codex) TARGETS+=("$HOME/.codex/skills") ;;
     --agents) TARGETS+=("$HOME/.agents/skills") ;;
+    --antigravity) TARGETS+=("$HOME/.gemini/antigravity-cli/skills") ;;
     --dry-run) DRY=1 ;;
     --remove) REMOVE=1 ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
     *) echo "unknown option $a" >&2; exit 2 ;;
   esac
 done
