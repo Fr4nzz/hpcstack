@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# hpc-run: run a command or script on a cluster login node inside a login shell so scheduler tools are on PATH.
+#
+#   hpc-run [-t SECS] [--host HOST] [--ssh CMD] '<command>'
+#   hpc-run [-t SECS] [--host HOST] [--ssh CMD] < script.sh
+#
+# Wraps the remote side in `bash -lc` (command) or `bash -ls` (stdin script) under `timeout`.
+# Config: ~/.config/hpcstack/hpc-run.conf (or $HPC_RUN_CONF) may set HPC_SSH and HPC_HOST as KEY=VALUE lines.
+# Env: HPC_SSH          ssh command split on spaces (default "ssh", e.g. "tsh ssh" for Teleport)
+#      HPC_HOST         target login node (e.g. user@login-node), overridden by --host
+#      HPC_RUN_TIMEOUT  default timeout in seconds (default 60; 0 disables timeout)
+# Exit codes: remote exit code, 124 on timeout, 2 on usage error.
+set -Eeuo pipefail
+
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
+die() { local c=$1; shift; echo "hpc-run: $*" >&2; exit "$c"; }
+
+CONF="${HPC_RUN_CONF:-$HOME/.config/hpcstack/hpc-run.conf}"
+CONF_SSH="" CONF_HOST=""
+if [[ -f $CONF ]]; then
+  while IFS= read -r line || [[ -n $line ]]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z $line || $line != *=* ]] && continue
+    k="${line%%=*}"
+    v="${line#*=}"
+    k="${k%"${k##*[![:space:]]}"}"
+    v="${v#"${v%%[![:space:]]*}"}"
+    if [[ ( $v == \"*\" && $v == *\" ) || ( $v == \'*\' && $v == *\' ) ]]; then
+      v="${v:1:${#v}-2}"
+    fi
+    case $k in
+      HPC_SSH) CONF_SSH=$v ;;
+      HPC_HOST) CONF_HOST=$v ;;
+    esac
+  done < "$CONF"
+fi
+
+SSH_STR="${HPC_SSH:-${CONF_SSH:-ssh}}"
+HOST="${HPC_HOST:-$CONF_HOST}"
+TIMEOUT="${HPC_RUN_TIMEOUT:-60}"
+
+while (( $# > 0 )); do
+  case $1 in
+    -t|--timeout)
+      (( $# >= 2 )) || die 2 "missing argument for $1"
+      TIMEOUT=$2; shift 2 ;;
+    --host)
+      (( $# >= 2 )) || die 2 "missing argument for $1"
+      HOST=$2; shift 2 ;;
+    --ssh)
+      (( $# >= 2 )) || die 2 "missing argument for $1"
+      SSH_STR=$2; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    --)
+      shift; break ;;
+    -*)
+      die 2 "unknown option: $1 (use -- before a command starting with -)" ;;
+    *)
+      break ;;
+  esac
+done
+
+[[ $TIMEOUT =~ ^[0-9]+$ ]] || die 2 "timeout must be a non-negative integer, got '$TIMEOUT'"
+[[ -n $HOST ]] || die 2 "no host set (pass --host USER@HOST, set HPC_HOST, or add HPC_HOST=... to $CONF)"
+
+read -r -a SSH_CMD <<< "$SSH_STR"
+(( ${#SSH_CMD[@]} > 0 )) || die 2 "HPC_SSH is empty"
+
+REMOTE_CMD=""
+STDIN_MODE=0
+if (( $# == 1 )); then
+  REMOTE_CMD="bash -lc $(printf '%q' "$1")"
+elif (( $# > 1 )); then
+  printf -v joined '%q ' "$@"
+  REMOTE_CMD="bash -lc $(printf '%q' "${joined% }")"
+else
+  [[ ! -t 0 ]] || die 2 "provide a command argument or pipe a script on stdin"
+  REMOTE_CMD="bash -ls"
+  STDIN_MODE=1
+fi
+
+errfile=$(mktemp "${TMPDIR:-/tmp}/hpc-run.err.XXXXXX")
+trap 'rm -f -- "$errfile"' EXIT
+
+# Always pass -k 5 to timeout so SIGKILL reaps a child stuck in T state or ignoring SIGTERM.
+# In command mode, bind stdin to /dev/null so ssh/tsh under a PTY never stops on SIGTTIN/SIGTTOU.
+rc=0
+if (( STDIN_MODE )); then
+  if (( TIMEOUT > 0 )); then
+    timeout -k 5 "$TIMEOUT" "${SSH_CMD[@]}" "$HOST" "$REMOTE_CMD" 2>"$errfile" || rc=$?
+  else
+    "${SSH_CMD[@]}" "$HOST" "$REMOTE_CMD" 2>"$errfile" || rc=$?
+  fi
+else
+  if (( TIMEOUT > 0 )); then
+    timeout -k 5 "$TIMEOUT" "${SSH_CMD[@]}" "$HOST" "$REMOTE_CMD" < /dev/null 2>"$errfile" || rc=$?
+  else
+    "${SSH_CMD[@]}" "$HOST" "$REMOTE_CMD" < /dev/null 2>"$errfile" || rc=$?
+  fi
+fi
+
+if [[ -s $errfile ]]; then
+  cat "$errfile" >&2
+fi
+
+if (( rc == 127 )) && grep -qE '(^|[: /])b(jobs|sub|kill|queues|hosts|acct|hist|mod|hpart|peek|stop|resume|mig|switch)([: ]|$).*not found' "$errfile"; then
+  echo "hpc-run: LSF not on PATH (exit 127): the remote shell did not load the LSF profile" >&2
+elif (( rc == 124 && TIMEOUT > 0 )); then
+  echo "hpc-run: timed out after ${TIMEOUT}s (raise with -t SECS)" >&2
+fi
+
+exit "$rc"
