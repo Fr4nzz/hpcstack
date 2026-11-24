@@ -1,0 +1,498 @@
+#!/usr/bin/env python3
+"""hpc-hold: bounded fail-hold wrapper for one-shot batch jobs.
+
+Wrap a batch command so a quick typo, import error, or config bug does not immediately forfeit a GPU
+allocation that waited hours in PEND:
+
+  hpc-hold run     --dir DIR [--fail-hold-min 5] [--max-hold-min 15] [--poll-s 3] -- CMD [ARGS...]
+  hpc-hold status  --dir DIR [--json]
+  hpc-hold retry   --dir DIR [--cwd DIR] -- CMD [ARGS...]
+  hpc-hold extend  --dir DIR [--min 5]
+  hpc-hold release --dir DIR [--reason TEXT]
+
+Behaviour of `run`:
+  - On rc == 0: writes beacon.json (status=DONE) and exits 0 immediately (zero idle time).
+  - On rc != 0: kills any orphan children in the workload's process group, writes beacon.json
+    (status=HOLD_ON_FAIL, rc, tail of output, hold_until, hard_deadline) and polls cmd.json for up
+    to --fail-hold-min minutes (default 5).
+  - Inside the hold window, an operator or agent on the login node can send:
+      retry   run a fixed command inside the exact same live allocation
+      extend  add minutes once per hold, capped at --max-hold-min (default 15, hard ceiling)
+      release exit immediately with the original non-zero rc
+  - When the window expires (or cumulative hold time across attempts reaches --max-hold-min), exits
+    cleanly with the original non-zero rc. Signals (SIGTERM, SIGINT, SIGHUP, SIGUSR2) end the hold
+    or forward to the workload immediately and exit 128+N.
+"""
+import argparse
+import collections
+import datetime
+import json
+import os
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+UTC = datetime.timezone.utc
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGUSR2)
+MAX_EXTENSIONS = 1
+HARD_CEILING_MIN = 60.0
+
+
+def utc_iso(ts=None):
+    dt = datetime.datetime.fromtimestamp(time.time() if ts is None else ts, UTC)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def parse_iso(text):
+    dt = datetime.datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    return (dt if dt.tzinfo else dt.replace(tzinfo=UTC)).timestamp()
+
+
+def job_id():
+    return os.environ.get("LSB_JOBID") or os.environ.get("SLURM_JOB_ID") or "local"
+
+
+def beacon_path(d):
+    return os.path.join(d, "beacon.json")
+
+
+def cmd_path(d):
+    return os.path.join(d, "cmd.json")
+
+
+def write_json(path, obj):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.tmp.{os.getpid()}")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, indent=1, sort_keys=True)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def safe_unlink(path):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+class Interrupted(Exception):
+    def __init__(self, signum):
+        super().__init__(signum)
+        self.signum = signum
+
+
+def _on_signal(signum, _frame):
+    for sig in STOP_SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
+    raise Interrupted(signum)
+
+
+def stop_group(proc, sig, grace):
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def run_once(cmd, cwd, tail_bytes):
+    """Run cmd in its own process group, teeing combined stdout/stderr live while keeping the last tail_bytes."""
+    chunks = collections.deque()
+    size = 0
+
+    def pump(stream):
+        nonlocal size
+        fd = stream.fileno()
+        while True:
+            try:
+                data = os.read(fd, 4096)
+            except OSError:
+                break
+            if not data:
+                break
+            try:
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+            except OSError:
+                pass
+            if tail_bytes > 0:
+                chunks.append(data)
+                size += len(data)
+                while size > tail_bytes and len(chunks) > 1:
+                    size -= len(chunks.popleft())
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd or None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except OSError as e:
+        msg = f"hpc-hold: could not start {shlex.join(cmd)}: {e}\n"
+        sys.stderr.write(msg)
+        sys.stderr.flush()
+        return 127, msg.strip()
+
+    reader = threading.Thread(target=pump, args=(proc.stdout,), daemon=True)
+    reader.start()
+    interrupted = None
+    try:
+        rc = proc.wait()
+    except Interrupted as e:
+        interrupted = e
+        grace = 30.0 if e.signum == signal.SIGUSR2 else 10.0
+        stop_group(proc, e.signum, grace)
+        try:
+            rc = proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            rc = 128 + e.signum
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        reader.join(timeout=2.0)
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+
+    raw = b"".join(chunks)
+    if tail_bytes > 0 and len(raw) > tail_bytes:
+        raw = raw[-tail_bytes:]
+    tail = raw.decode("utf-8", errors="replace").strip()
+    if interrupted is not None:
+        raise interrupted
+    return rc, tail
+
+
+def cmd_run(a):
+    if not a.cmd:
+        print("hpc-hold run: command required after --", file=sys.stderr)
+        return 2
+    if a.fail_hold_min < 0 or a.max_hold_min < 0 or a.max_hold_min > HARD_CEILING_MIN:
+        print(f"hpc-hold run: hold minutes must be between 0 and {HARD_CEILING_MIN:g}", file=sys.stderr)
+        return 2
+    if a.fail_hold_min > a.max_hold_min:
+        print("hpc-hold run: --fail-hold-min cannot exceed --max-hold-min", file=sys.stderr)
+        return 2
+    if a.poll_s <= 0:
+        print("hpc-hold run: --poll-s must be positive", file=sys.stderr)
+        return 2
+
+    ctrl = os.path.abspath(a.dir)
+    os.makedirs(ctrl, exist_ok=True)
+    safe_unlink(cmd_path(ctrl))
+
+    for sig in STOP_SIGNALS:
+        signal.signal(sig, _on_signal)
+
+    host = socket.gethostname()
+    jid = job_id()
+    pid = os.getpid()
+    cur_cmd = list(a.cmd)
+    cur_cwd = os.getcwd()
+    attempt = 1
+    total_hold_s = 0.0
+    max_hold_s = a.max_hold_min * 60.0
+
+    def base_beacon(status, **extra):
+        data = {
+            "status": status,
+            "job_id": jid,
+            "host": host,
+            "pid": pid,
+            "attempt": attempt,
+            "cmd": cur_cmd,
+            "cwd": cur_cwd,
+            "dir": ctrl,
+            "updated_at": utc_iso(),
+        }
+        data.update(extra)
+        return data
+
+    try:
+        while True:
+            started_at = utc_iso()
+            write_json(beacon_path(ctrl), base_beacon("RUNNING", started_at=started_at))
+            rc, tail = run_once(cur_cmd, cur_cwd, a.log_tail_bytes)
+            if rc == 0:
+                write_json(beacon_path(ctrl), base_beacon("DONE", rc=0, started_at=started_at, ended_at=utc_iso()))
+                return 0
+
+            budget_left = max_hold_s - total_hold_s
+            hold_s = min(a.fail_hold_min * 60.0, budget_left)
+            if hold_s <= 0:
+                write_json(beacon_path(ctrl), base_beacon(
+                    "FAILED", rc=rc, started_at=started_at, ended_at=utc_iso(), tail=tail,
+                ))
+                return rc
+
+            hold_start = time.time()
+            hold_deadline = hold_start + hold_s
+            hard_deadline = hold_start + budget_left
+            extensions_used = 0
+            failed_at = utc_iso(hold_start)
+
+            def publish_hold():
+                write_json(beacon_path(ctrl), base_beacon(
+                    "HOLD_ON_FAIL",
+                    rc=rc,
+                    started_at=started_at,
+                    failed_at=failed_at,
+                    hold_until=utc_iso(hold_deadline),
+                    hard_deadline=utc_iso(hard_deadline),
+                    extensions_used=extensions_used,
+                    max_extensions=MAX_EXTENSIONS,
+                    tail=tail,
+                ))
+
+            publish_hold()
+            print(
+                f"hpc-hold: attempt {attempt} failed (rc={rc}) on {host} (job {jid}). "
+                f"Holding slot until {utc_iso(hold_deadline)} (max {utc_iso(hard_deadline)}). "
+                f"Control dir: {ctrl}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+            next_action = None
+            while True:
+                now_t = time.time()
+                req = read_json(cmd_path(ctrl))
+                if req is not None:
+                    req_attempt = req.get("attempt")
+                    action = req.get("action")
+                    if req_attempt is not None and int(req_attempt) != attempt:
+                        safe_unlink(cmd_path(ctrl))
+                    elif action == "retry" and isinstance(req.get("cmd"), list) and req["cmd"]:
+                        safe_unlink(cmd_path(ctrl))
+                        next_action = ("retry", [str(x) for x in req["cmd"]], req.get("cwd") or cur_cwd)
+                        break
+                    elif action == "release":
+                        safe_unlink(cmd_path(ctrl))
+                        next_action = ("release", str(req.get("reason") or ""))
+                        break
+                    elif action == "extend":
+                        safe_unlink(cmd_path(ctrl))
+                        if extensions_used < MAX_EXTENSIONS and hold_deadline < hard_deadline:
+                            add_min = float(req.get("minutes") or a.fail_hold_min)
+                            if add_min > 0:
+                                hold_deadline = min(hold_deadline + add_min * 60.0, hard_deadline)
+                                extensions_used += 1
+                                publish_hold()
+                                print(
+                                    f"hpc-hold: extended hold until {utc_iso(hold_deadline)} "
+                                    f"({extensions_used}/{MAX_EXTENSIONS})",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                    else:
+                        safe_unlink(cmd_path(ctrl))
+
+                if now_t >= hold_deadline:
+                    next_action = ("expired",)
+                    break
+                time.sleep(min(a.poll_s, max(0.05, hold_deadline - now_t)))
+
+            total_hold_s += max(0.0, time.time() - hold_start)
+
+            if next_action[0] == "retry":
+                cur_cmd = next_action[1]
+                cur_cwd = next_action[2]
+                attempt += 1
+                print(
+                    f"hpc-hold: starting retry attempt {attempt}: {shlex.join(cur_cmd)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+
+            if next_action[0] == "release":
+                reason = next_action[1]
+                write_json(beacon_path(ctrl), base_beacon(
+                    "RELEASED", rc=rc, started_at=started_at, failed_at=failed_at,
+                    ended_at=utc_iso(), reason=reason, tail=tail,
+                ))
+                print(
+                    f"hpc-hold: released slot (rc={rc})" + (f": {reason}" if reason else ""),
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return rc
+
+            write_json(beacon_path(ctrl), base_beacon(
+                "EXPIRED", rc=rc, started_at=started_at, failed_at=failed_at,
+                ended_at=utc_iso(), tail=tail,
+            ))
+            print(f"hpc-hold: hold window expired, exiting with rc={rc}", file=sys.stderr, flush=True)
+            return rc
+
+    except Interrupted as e:
+        write_json(beacon_path(ctrl), base_beacon(
+            "INTERRUPTED", signal=e.signum, rc=128 + e.signum, ended_at=utc_iso(),
+        ))
+        print(f"hpc-hold: stopped by signal {e.signum}", file=sys.stderr, flush=True)
+        return 128 + e.signum
+
+
+def require_hold(ctrl):
+    data = read_json(beacon_path(ctrl))
+    if data is None:
+        print(f"hpc-hold: no beacon at {beacon_path(ctrl)}", file=sys.stderr)
+        return None
+    if data.get("status") != "HOLD_ON_FAIL":
+        print(f"hpc-hold: refused, status is {data.get('status')!r} (not HOLD_ON_FAIL)", file=sys.stderr)
+        return None
+    return data
+
+
+def cmd_retry(a):
+    if not a.cmd:
+        print("hpc-hold retry: command required after --", file=sys.stderr)
+        return 2
+    ctrl = os.path.abspath(a.dir)
+    data = require_hold(ctrl)
+    if data is None:
+        return 1
+    cwd = os.path.abspath(a.cwd) if a.cwd else (data.get("cwd") or os.getcwd())
+    write_json(cmd_path(ctrl), {
+        "action": "retry",
+        "attempt": data["attempt"],
+        "cmd": list(a.cmd),
+        "cwd": cwd,
+        "requested_at": utc_iso(),
+    })
+    print(f"hpc-hold: queued retry for attempt {data['attempt']} in {ctrl}: {shlex.join(a.cmd)}")
+    return 0
+
+
+def cmd_extend(a):
+    if a.minutes <= 0:
+        print("hpc-hold extend: --min must be positive", file=sys.stderr)
+        return 2
+    ctrl = os.path.abspath(a.dir)
+    data = require_hold(ctrl)
+    if data is None:
+        return 1
+    used = int(data.get("extensions_used", 0))
+    limit = int(data.get("max_extensions", MAX_EXTENSIONS))
+    if used >= limit:
+        print(f"hpc-hold extend: refused, already extended {used}/{limit} time(s)", file=sys.stderr)
+        return 1
+    if data.get("hold_until") and data.get("hard_deadline") and data["hold_until"] >= data["hard_deadline"]:
+        print("hpc-hold extend: refused, already at hard_deadline", file=sys.stderr)
+        return 1
+    write_json(cmd_path(ctrl), {
+        "action": "extend",
+        "attempt": data["attempt"],
+        "minutes": a.minutes,
+        "requested_at": utc_iso(),
+    })
+    print(f"hpc-hold: requested +{a.minutes:g} min extension for attempt {data['attempt']} in {ctrl}")
+    return 0
+
+
+def cmd_release(a):
+    ctrl = os.path.abspath(a.dir)
+    data = require_hold(ctrl)
+    if data is None:
+        return 1
+    write_json(cmd_path(ctrl), {
+        "action": "release",
+        "attempt": data["attempt"],
+        "reason": (a.reason or "").strip(),
+        "requested_at": utc_iso(),
+    })
+    print(f"hpc-hold: requested release for attempt {data['attempt']} in {ctrl}")
+    return 0
+
+
+def cmd_status(a):
+    ctrl = os.path.abspath(a.dir)
+    data = read_json(beacon_path(ctrl))
+    if data is None:
+        print(f"hpc-hold: no beacon at {beacon_path(ctrl)}", file=sys.stderr)
+        return 1
+    if a.json:
+        print(json.dumps(data, indent=1, sort_keys=True))
+        return 0
+    left = ""
+    if data.get("status") == "HOLD_ON_FAIL" and data.get("hold_until"):
+        rem = max(0.0, parse_iso(data["hold_until"]) - time.time())
+        left = f" ({rem / 60:.1f} min left, until {data['hold_until']})"
+    print(
+        f"status={data.get('status')} job={data.get('job_id')} host={data.get('host')} "
+        f"attempt={data.get('attempt')} rc={data.get('rc')}{left}"
+    )
+    if data.get("tail"):
+        lines = data["tail"].splitlines()[-8:]
+        print("tail:\n  " + "\n  ".join(lines))
+    return 0
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="sub", required=True)
+
+    s = sub.add_parser("run", help="run a command inside a batch job, holding briefly on non-zero exit")
+    s.add_argument("--dir", required=True, help="shared control directory (e.g. on Lustre) for beacon.json and cmd.json")
+    s.add_argument("--fail-hold-min", type=float, default=5.0,
+                   help="minutes to hold the slot on non-zero exit (default 5; 0 disables)")
+    s.add_argument("--max-hold-min", type=float, default=15.0,
+                   help="hard cumulative hold ceiling in minutes across extensions and retries (default 15, max 60)")
+    s.add_argument("--poll-s", type=float, default=3.0, help="control-file poll interval in seconds (default 3)")
+    s.add_argument("--log-tail-bytes", type=int, default=4096, help="bytes of combined output kept in beacon.json")
+    s.add_argument("cmd", nargs=argparse.REMAINDER)
+
+    s = sub.add_parser("retry", help="run a fixed command inside an active HOLD_ON_FAIL allocation")
+    s.add_argument("--dir", required=True)
+    s.add_argument("--cwd", help="working directory for the retry (default: the original job's cwd)")
+    s.add_argument("cmd", nargs=argparse.REMAINDER)
+
+    s = sub.add_parser("extend", help="extend an active HOLD_ON_FAIL window once (up to --max-hold-min)")
+    s.add_argument("--dir", required=True)
+    s.add_argument("--min", dest="minutes", type=float, default=5.0, help="minutes to add (default 5)")
+
+    s = sub.add_parser("release", help="end an active HOLD_ON_FAIL immediately with the original non-zero rc")
+    s.add_argument("--dir", required=True)
+    s.add_argument("--reason", default="", help="optional reason recorded in beacon.json")
+
+    s = sub.add_parser("status", help="show the current beacon state")
+    s.add_argument("--dir", required=True)
+    s.add_argument("--json", action="store_true")
+
+    a = p.parse_args(argv)
+    if a.sub in ("run", "retry") and a.cmd and a.cmd[0] == "--":
+        a.cmd = a.cmd[1:]
+    return {"run": cmd_run, "retry": cmd_retry, "extend": cmd_extend,
+            "release": cmd_release, "status": cmd_status}[a.sub](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

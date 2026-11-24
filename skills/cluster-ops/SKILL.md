@@ -27,8 +27,7 @@ sessions one at a time, each checked to be an idle shell.
 
 - Anything that runs longer than you are sure to be watching, or can be scripted, is a batch job or a worker-queue
   task (`cluster-autoresearch`). Batch jobs end on their own when the agent stops.
-- Interactive is for probes, first-run debugging and commands that have no script yet. It always runs through
-  `scripts/hpc-probe`, which adds `scripts/hpc-session`, with a short walltime. Anything else is a bug.
+- Interactive is for probes, first-run debugging and unscripted commands, always via `scripts/hpc-probe` (`scripts/hpc-session`, short walltime).
 - Local GPU or cluster: for a GPU step over about 15 min, compare the recent PEND for the request plus cluster
   runtime and upload with the local GPU's measured time. Take the faster and say why.
 
@@ -105,8 +104,8 @@ bsub -J name -q <queue> -n 4 -M 8000 -R "select[mem>=8000] rusage[mem=8000] span
      -W 4:00 -o logs/%J.out -e logs/%J.err -wa USR2 -wt 10 bash job.sh
 ```
 
-Arrays: `-J 'name[1-500]%50'` with `%I` in log names. Housekeeping gets `-sp 1`. `-wa USR2 -wt 10` warns ten
-minutes before the limit so the job can save (`references/checkpointing.md`).
+Arrays: `-J 'name[1-500]%50'` with `%I` in logs, `-sp 1` for housekeeping, `-wa USR2 -wt 10` for walltime warning
+(`references/checkpointing.md`). Wrap one-shot GPU jobs in `scripts/hpc-hold` (exits on `rc == 0`, 5-min fail-hold for `retry`/`release`).
 
 Job scripts start from `references/job-script-template.sh`:
 
