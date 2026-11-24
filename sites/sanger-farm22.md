@@ -72,7 +72,10 @@ cores, 3.8 TB of memory and 30 days, which reflects the largest hosts and queues
 - Ask for the measured busy cores plus one (`cluster-ops`, "Size the request"). When the few hosts that fit a
   large GPU request are short of cores, `-n` lengthens the wait. On average, GPU memory above 32G mattered more.
 - "Affinity ... not enough processor units" here also appears when the `gmem` filter or a full queue is the
-  real block. Diagnose it as in `cluster-ops/references/lsf.md` ("Why pending") before cutting cores.
+  real block. For shared GPU jobs that do not need strict GPU-to-NUMA-socket CPU binding, adding `:aff=no` to `-gpu`
+  (for example `-gpu "num=1:mode=shared:j_exclusive=no:gmem=<size>G:aff=no"`) lets LSF place CPU slots on another
+  socket of the same host and has cleared hour-plus affinity PEND stalls. Otherwise diagnose as in
+  `cluster-ops/references/lsf.md` ("Why pending") before cutting cores.
 
 ## Nextflow
 

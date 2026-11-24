@@ -24,7 +24,7 @@ refused, choose `-W` up front and resubmit when it runs out.
 | cores on one host | `-n 8 -R "span[hosts=1]"` |
 | memory | `-M 8000 -R "select[mem>=8000] rusage[mem=8000]"` |
 | walltime | `-W 4:00` (hours:minutes) |
-| GPU | `-gpu "num=1:gmem=<size>G"`. On a shared GPU, a job without a `gmem` floor can fail at model load because another job holds the memory |
+| GPU | `-gpu "num=1:mode=shared:j_exclusive=no:gmem=<size>G:aff=no"`. On a shared GPU, always set a `gmem` floor so another job cannot starve model load, and add `:aff=no` when strict NUMA-socket binding is not needed |
 | logs | `-o logs/%J.out -e logs/%J.err` (arrays: `%J.%I`) |
 | array with cap | `-J 'name[1-500]%50'`, index in `$LSB_JOBINDEX` |
 | dependency | `-w "done(<jobid>)"` on exact ids (Dependencies) |
@@ -78,7 +78,10 @@ binding, a GPU-memory (`gmem`) filter that only the largest GPUs meet, the memor
 1. Read every reason and host in `bjobs -p -l <id>`, not just the first line.
 2. Check free GPU memory per host (`bhosts -gpu -l`, `lshosts -gpu`) and the hosts the queue reaches
    (`bqueues -l <queue>`).
-3. Change one thing at a time: GPU memory first, then cores, then memory. Relax only what is over-strict. Lower
+3. Change one thing at a time: on a shared GPU job where hosts have free GPU memory and free CPU slots on another
+   NUMA socket, add `:aff=no` to `-gpu` first (disables strict GPU-to-NUMA CPU affinity, which can clear multi-hour
+   affinity PEND stalls when cross-socket PCIe overhead is negligible). Next check GPU memory, then cores, then
+   memory. Relax only what is over-strict. Lower
    `gmem` to about 1.3 x the measured peak (SKILL.md, GPU memory), or replace it with a GPU-model constraint
    (`gmodel=`, checked with `lshosts -gpu`) whose memory covers that peak. Never drop the GPU-memory floor: the
    job can then land on a GPU too small for it and fail with CUDA out of memory.
