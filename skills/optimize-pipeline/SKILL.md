@@ -47,13 +47,15 @@ Ask the user before any change of class D or any recipe change.
      peak GPU memory (process it in chunks) so it stays on the GPU.
 4. **Classify every change and verify it the cheap way:**
    - **E, exact**: output identical. Thread counts, skipping work whose result is known, vectorising,
-     chunking, prefetch depth, allocator settings. Verify by identity: `cmp`, `md5sum` of sorted output,
+     chunking, prefetch depth, allocator settings (such as `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`).
+     Verify by identity: `cmp`, `md5sum` of sorted output,
      `samtools view | md5sum`, `np.array_equal` on a few thousand items. For training, also check that the loss
      at a fixed iteration of a short run is identical. Keep if it saves at least 5 % time or 10 % memory.
    - **W, scheduling-like**: fewer workers, a different item-to-worker assignment, nondeterministic order. Like a
      new seed: verify the output is equivalent up to order or seed noise.
-   - **D, distribution-changing**: mixed precision, lossy compression, resized inputs, a different
-     algorithm. Keep only with a large gain (at least 15 % time or 25 % memory) AND a pre-registered
+   - **D, distribution-changing**: mixed precision, lossy compression, resized inputs, GPU augmentation,
+     `torch.compile`, `channels_last`, a different algorithm (some also clash with custom optimizers). Keep only
+     with a large gain (at least 15 % time or 25 % memory) AND a pre-registered
      equivalence test that passes (for example, metric within max(2 x seed spread, a fixed floor)).
    - **Recipe changes** (fewer epochs, a smaller model, a different filter) are not pipeline changes. They
      need their own full test and are never folded in silently.
@@ -77,6 +79,11 @@ always zero for this data. Skipped it (class E, identical). With a vectorised lo
   another user's job.
 - Don't over-test exact changes. If every kept change is class E or W, the normal seeds of the real run
   already measure the remaining noise.
+- **Seeds must differ in the data order.** Some frameworks seed the data loader with a constant plus rank, so
+  fine-tuning from one checkpoint trains identically across seeds: check that seed 1's first logged losses differ
+  from seed 0's before launching more seeds.
+- **Match stopping length in paired comparisons.** Early stopping on a noisy validation score can halt one arm
+  early and make arms differ in length. Set patience >= epochs, or stop both arms at the same epoch.
 - Record versions. A library upgrade mid-study invalidates the baseline.
 
 ## Done means
