@@ -4,7 +4,7 @@
 Wrap a batch command so a quick typo, import error, or config bug does not immediately forfeit a GPU
 allocation that waited hours in PEND:
 
-  hpc-hold run     --dir DIR [--fail-hold-min 5] [--max-hold-min 15] [--poll-s 3] -- CMD [ARGS...]
+  hpc-hold run     --dir DIR [--fail-hold-min 8] [--max-hold-min 15] [--poll-s 3] -- CMD [ARGS...]
   hpc-hold status  --dir DIR [--json]
   hpc-hold retry   --dir DIR [--cwd DIR] -- CMD [ARGS...]
   hpc-hold extend  --dir DIR [--min 5]
@@ -462,8 +462,8 @@ def main(argv=None):
 
     s = sub.add_parser("run", help="run a command inside a batch job, holding briefly on non-zero exit")
     s.add_argument("--dir", required=True, help="shared control directory (e.g. on Lustre) for beacon.json and cmd.json")
-    s.add_argument("--fail-hold-min", type=float, default=5.0,
-                   help="minutes to hold the slot on non-zero exit (default 5; 0 disables)")
+    s.add_argument("--fail-hold-min", type=float, default=8.0,
+                   help="minutes to hold the slot on non-zero exit (default 8; 0 disables)")
     s.add_argument("--max-hold-min", type=float, default=15.0,
                    help="hard cumulative hold ceiling in minutes across extensions and retries (default 15, max 60)")
     s.add_argument("--poll-s", type=float, default=3.0, help="control-file poll interval in seconds (default 3)")

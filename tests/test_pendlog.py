@@ -619,7 +619,8 @@ def test_gpu_memory_from_model_name():
 
 
 def test_snapshot_counts_gpus_that_could_take_it(lsf):
-    for req, want in (("-n 4 -gpu 'num=1:gmem=40G'", (2, 1, 2)), ("-gpu 'num=1:gmem=8G'", (3, 2, 3)),
+    # big-01 GPU 1 has MUSED=10G, MRSV=50G -> 30G schedulable free VRAM (fits 8G, does not fit 40G)
+    for req, want in (("-n 4 -gpu 'num=1:gmem=40G'", (2, 1, 1)), ("-gpu 'num=1:gmem=8G'", (3, 2, 3)),
                       ("-gpu 'num=1:gmem=8G:gmodel=NVIDIAH10080GBHBM3'", (0, 0, 0))):
         run(lsf, PENDLOG, "snapshot", "--queue", "gpu", "--hosts-from-request", req, "--out", str(lsf["out"]))
         s = jsonl(lsf["out"] / "snapshots.jsonl")[-1]
@@ -629,10 +630,10 @@ def test_snapshot_counts_gpus_that_could_take_it(lsf):
 
 
 def test_export_load_columns(lsf):
-    submit(lsf, "bsub", "-q", "gpu", "-n", "4", "-gpu", "num=1:gmem=40G", "x")
+    submit(lsf, "bsub", "-q", "gpu", "-n", "4", "-gpu", "num=1:gmem=40G:aff=no", "x")
     (row,) = csv.DictReader(io.StringIO(run(lsf, PENDLOG, "export", "--out", str(lsf["out"])).stdout))
-    assert (row["snap_gpus_capable"], row["snap_gpus_idle"], row["snap_gpus_free_mem"]) == ("2", "1", "2")
-    assert row["dependency"] == "0"
+    assert (row["snap_gpus_capable"], row["snap_gpus_idle"], row["snap_gpus_free_mem"]) == ("2", "1", "1")
+    assert row["dependency"] == "0" and row["aff_no"] == "1"
 
 
 def lsf_report(job_id, sub_ts, start_ts):
@@ -715,3 +716,48 @@ def test_dependency_jobs_are_left_out_of_risk(lsf):
                         request="bsub -q gpu -w 'done(5)' x", dependency=""))
     out = pend_risk(lsf, hist, "-q gpu -gpu num=1:gmem=40G").stdout
     assert "Of 3 similar jobs in the last 4 weeks, 0 of the 3" in out
+
+
+def test_fairshare_picks_active_group_and_parent_priority():
+    mod = _load_pendlog()
+    txt = """
+SHARE_INFO_FOR: gpu/org/other/idle_grp/
+ USER/GROUP   SHARES  PRIORITY  STARTED  RESERVED  CPU_TIME  RUN_TIME   ADJUST
+ tester           1       0.333      0        0         0.0        0       0.000
+
+SHARE_INFO_FOR: gpu/org/div/
+ USER/GROUP   SHARES  PRIORITY  STARTED  RESERVED  CPU_TIME  RUN_TIME   ADJUST
+ active_grp       1       0.012     20        0     79223.4    15756       0.000
+
+SHARE_INFO_FOR: gpu/org/div/active_grp/
+ USER/GROUP   SHARES  PRIORITY  STARTED  RESERVED  CPU_TIME  RUN_TIME   ADJUST
+ tester           1       0.024      8        0     71000.7      276       0.000
+"""
+    got = mod.parse_fairshare(txt, "tester")
+    assert got == {
+        "fairshare_shares": "1",
+        "fairshare_priority": "0.024",
+        "fairshare_group": "active_grp",
+        "fairshare_group_priority": "0.012",
+    }
+
+
+def test_host_schedulable_ram_limits_fit_and_gpu_counts():
+    mod = _load_pendlog()
+    bh_l = """
+HOST  big-01
+ CURRENT LOAD USED FOR SCHEDULING:
+                r15s   r1m  r15m    ut    pg    io   ls    it   tmp   swp   mem  slots
+ Total           0.0   0.0   0.0    4%   0.0   346    0  1563 1377G 186.2G 12.0G     54
+ Reserved        0.0   0.0   0.0    0%   0.0     0    0     0    0M    0M 650.2G      -
+"""
+    mem = mod.parse_bhosts_l_mem(bh_l)
+    assert mem["big-01"] == 12288.0
+    gpus = [{"model": "NVIDIAA100_SXM4_80GB", "mem_gb": 80.0, "mrsv_gb": 0.0, "mused_gb": 0.0, "njobs": 0}]
+    slots = {"big-01": {"status": "ok", "free": 54, "free_mem_mb": mem["big-01"]}}
+    req_small = {"cores": 4, "mem_mb": 8000.0, "gpu_num": 1, "gmem_gb": 16.0, "gmodel": "", "host_incl": [], "host_excl": []}
+    req_large = dict(req_small, mem_mb=24000.0)
+    assert mod.host_fits(req_small, "big-01", gpus, slots["big-01"]) is True
+    assert mod.host_fits(req_large, "big-01", gpus, slots["big-01"]) is False
+    assert mod.gpu_counts(req_small, {"big-01": gpus}, slots) == {"gpus_capable": 1, "gpus_idle": 1, "gpus_free_mem": 1}
+    assert mod.gpu_counts(req_large, {"big-01": gpus}, slots) == {"gpus_capable": 1, "gpus_idle": 0, "gpus_free_mem": 0}

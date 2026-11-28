@@ -77,7 +77,7 @@ ledger and the receipt: `references/sizing.md`.
 - Never cut `-M` or cores below what was measured just to start sooner. Find out why it pends (Recover).
 - Append each verified run to the project's ledger, and read it before sizing a new job.
 - PEND time cannot be predicted. `scripts/pendlog` logs waits and `scripts/pend-risk` gives the share of similar
-  recent jobs that waited over 1 h (`references/sizing.md`, untested on a cluster).
+  recent jobs that waited over 1 h (`references/sizing.md`).
 - Genomics batch work (arrays per sample, Java heaps, linkage maps): `references/genomics.md`.
 
 **Preflight.** Before anything goes to the scheduler, resolve every "no" (an unmeasured first run gets a modest
@@ -94,7 +94,7 @@ request, labelled as such). If you cannot resolve one, report it and wait for th
    recorded. Pack above about 50 per run. Temp files and expanded archives on node-local disk. Output to a new
    versioned directory.
 5. The job writes `status.json`, checkpoints, traps the walltime warning and cleans up. Dependencies use exact ids.
-6. Every variant was dry-built on CPU in the job's own environment (imports, then data assembly).
+6. Every variant was dry-built on CPU in the job's own environment (`bash -n` on scripts, imports and data assembly).
 7. You know what "finished correctly" looks like: files, counts, checksums.
 
 ## Submit
@@ -105,7 +105,7 @@ bsub -J name -q <queue> -n 4 -M 8000 -R "select[mem>=8000] rusage[mem=8000] span
 ```
 
 Arrays: `-J 'name[1-500]%50'` with `%I` in logs, `-sp 1` for housekeeping, `-wa USR2 -wt 10` for walltime warning
-(`references/checkpointing.md`). Wrap one-shot GPU jobs in `scripts/hpc-hold` (exits on `rc == 0`, 5-min fail-hold for `retry`/`release`).
+(`references/checkpointing.md`). Wrap one-shot GPU jobs in `scripts/hpc-hold` (exits on `rc == 0`, 8-min fail-hold for `retry`/`release`).
 
 Job scripts start from `references/job-script-template.sh`:
 

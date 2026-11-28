@@ -123,7 +123,7 @@ def parse_request(args):
     if args and os.path.basename(args[0]) == "bsub":
         args = args[1:]
     r = {"queue": None, "cores": None, "mem_mb": None, "gpu_num": None, "gmem_gb": None, "gmodel": "",
-         "j_exclusive": False, "pin": False, "host_incl": [], "host_excl": [], "array_size": 1,
+         "j_exclusive": False, "aff_no": False, "pin": False, "host_incl": [], "host_excl": [], "array_size": 1,
          "runlimit": None, "resreq": [], "flags": [], "dependency": False}
     i = 0
     while i < len(args):
@@ -183,6 +183,7 @@ def parse_request(args):
             r["gmem_gb"] = round(gm / 1024, 2) if gm else None
             r["gmodel"] = g.get("gmodel", "")
             r["j_exclusive"] = g.get("j_exclusive", "").lower() == "yes"
+            r["aff_no"] = g.get("aff", "").lower() == "no"
         i += 1
     r["pin"] = bool(r["gmodel"] and r["gmodel"].upper() != "NVIDIA") or bool(r["host_incl"])
     return r
@@ -271,6 +272,72 @@ def parse_bhosts_gpu(text):
     return hosts
 
 
+def parse_fairshare(text, user):
+    """Parse `bqueues -r <queue>` hierarchical fairshare trees for `user`.
+
+    Users can appear in multiple groups (e.g. an idle group at 0.333 listed before their active group).
+    Pick the active branch (highest STARTED / CPU_TIME / RUN_TIME, breaking ties by lowest priority)
+    and also return the parent group name and its priority from its own parent SHARE_INFO_FOR block.
+    """
+    if not text or not user:
+        return {}
+    cur_path = ""
+    rows = []  # (path, name, shares, prio_str, prio_f, started, activity)
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        m = re.match(r"^SHARE_INFO_FOR:\s*(\S+)", s)
+        if m:
+            cur_path = m.group(1).rstrip("/")
+            continue
+        p = s.split()
+        if len(p) < 3 or p[0] in ("USER/GROUP", "QUEUE:"):
+            continue
+        name = p[0].rstrip("/")
+        try:
+            prio_f = float(p[2])
+        except ValueError:
+            continue
+        started = to_int(p[3]) or 0 if len(p) > 3 else 0
+        cpu_t = float(p[5]) if len(p) > 5 and to_int(p[5]) is not None else 0.0
+        run_t = float(p[6]) if len(p) > 6 and to_int(p[6]) is not None else 0.0
+        rows.append((cur_path, name, p[1], p[2], prio_f, started, cpu_t + run_t))
+    matches = [r for r in rows if r[1] == user]
+    if not matches:
+        return {}
+    best = max(matches, key=lambda r: (r[5] > 0 or r[6] > 0, r[5], r[6], -r[4]))
+    out = {"fairshare_shares": best[2], "fairshare_priority": best[3]}
+    parts = [seg for seg in best[0].split("/") if seg]
+    if len(parts) >= 2:
+        grp = parts[-1]
+        parent_path = "/".join(parts[:-1])
+        out["fairshare_group"] = grp
+        for r in rows:
+            if r[0] == parent_path and r[1] == grp:
+                out["fairshare_group_priority"] = r[3]
+                break
+    return out
+
+
+def parse_bhosts_l_mem(text):
+    """`bhosts -l <hosts>` -> {host: schedulable free mem in MB} from CURRENT LOAD USED FOR SCHEDULING."""
+    out = {}
+    for blk in re.split(r"(?m)^HOST\s+", text or "")[1:]:
+        lines = blk.splitlines()
+        if not lines:
+            continue
+        host = lines[0].strip().split()[0]
+        m = re.search(r"CURRENT LOAD USED FOR SCHEDULING:.*?\n([^\n]+)\n\s*Total\s+([^\n]+)", blk, re.S)
+        if not m:
+            continue
+        d = dict(zip(m.group(1).split(), m.group(2).split()))
+        mb = mem_mb(d.get("mem"))
+        if mb is not None:
+            out[host] = round(mb, 1)
+    return out
+
+
 def host_fits(req, host, gpus, slots):
     """Can this host take the shape now? Approximate. None if unknown."""
     if host in req.get("host_excl", []) or (req.get("host_incl") and host not in req["host_incl"]):
@@ -282,6 +349,8 @@ def host_fits(req, host, gpus, slots):
             return False
         if req.get("cores") and slots.get("free") is not None and slots["free"] < req["cores"]:
             return False
+        if req.get("mem_mb") and slots.get("free_mem_mb") is not None and slots["free_mem_mb"] < req["mem_mb"]:
+            return False
     need = req.get("gpu_num") or 1
     free = 0
     for g in gpus:
@@ -290,7 +359,8 @@ def host_fits(req, host, gpus, slots):
         if req.get("gmem_gb"):
             if g.get("mem_gb") is None:
                 return None
-            if g["mem_gb"] - g.get("mrsv_gb", 0) < req["gmem_gb"]:
+            used_or_rsv = max(g.get("mrsv_gb", 0), g.get("mused_gb", 0))
+            if g["mem_gb"] - used_or_rsv < req["gmem_gb"]:
                 continue
         free += 1
     return free >= need
@@ -302,21 +372,25 @@ def model_ok(req, gpus):
 
 
 def gpu_counts(req, gpu_hosts, slots):
-    """GPUs that could take the request: capable at all, idle now, with enough unused memory now."""
+    """GPUs that could take the request: capable at all, idle now, with enough schedulable free memory now."""
     need = req.get("gmem_gb") or 0
+    req_mem = req.get("mem_mb")
     c = {"gpus_capable": 0, "gpus_idle": 0, "gpus_free_mem": 0}
     for h, gpus in gpu_hosts.items():
         sl = slots.get(h) or {}
         if (h in req.get("host_excl", []) or (req.get("host_incl") and h not in req["host_incl"])
                 or sl.get("status") not in ("ok", None) or not model_ok(req, gpus)):
             continue
-        room = sl.get("free") is None or sl["free"] >= (req.get("cores") or 1)
+        slots_ok = sl.get("free") is None or sl["free"] >= (req.get("cores") or 1)
+        mem_ok = req_mem is None or sl.get("free_mem_mb") is None or sl["free_mem_mb"] >= req_mem
+        room = slots_ok and mem_ok
         for g in gpus:
             if g.get("mem_gb") is None or g["mem_gb"] < need:
                 continue
             c["gpus_capable"] += 1
             c["gpus_idle"] += bool(room and not g.get("njobs"))
-            c["gpus_free_mem"] += bool(room and g["mem_gb"] - g.get("mused_gb", 0) >= max(need, 1))
+            used_or_rsv = max(g.get("mused_gb", 0), g.get("mrsv_gb", 0))
+            c["gpus_free_mem"] += bool(room and g["mem_gb"] - used_or_rsv >= max(need, 1))
     return c
 
 
@@ -339,26 +413,30 @@ def snapshot_lsf(queue, req, errors, user):
     s["own_run_all"] = sum(v for k, v in own.items() if k.endswith(":RUN"))
     s["own_pend_all"] = sum(v for k, v in own.items() if k.endswith(":PEND"))
     fs = run(["bqueues", "-r", queue], errors=errors)
-    for ln in (fs or "").splitlines():
-        p = ln.split()
-        if p and p[0].rstrip("/") == user and len(p) >= 3:
-            s["fairshare_shares"], s["fairshare_priority"] = p[1], p[2]
-            break
+    s.update(parse_fairshare(fs, user))
     if req.get("gpu_num") or req.get("gmem_gb") or req.get("gmodel"):
         gpu_hosts = parse_bhosts_gpu(run(["bhosts", "-gpu", "-w"], errors=errors))
         slots = {}
         if gpu_hosts:
-            for row in table(run(["bhosts", "-w", *sorted(gpu_hosts)], errors=errors)):
+            host_list = sorted(gpu_hosts)
+            for row in table(run(["bhosts", "-w", *host_list], errors=errors)):
                 mx, nj = to_int(row.get("MAX")), to_int(row.get("NJOBS"))
                 free = mx - nj if mx is not None and nj is not None else None
                 slots[row.get("HOST_NAME")] = {"status": row.get("STATUS"), "free": free}
+            free_mem = parse_bhosts_l_mem(run(["bhosts", "-l", *host_list], errors=None))
+            for h, mb in free_mem.items():
+                slots.setdefault(h, {})["free_mem_mb"] = mb
         hosts = []
         for h, gpus in sorted(gpu_hosts.items()):
+            sl = slots.get(h) or {}
             fit = host_fits(req, h, gpus, slots.get(h))
-            hosts.append({"host": h, "status": (slots.get(h) or {}).get("status"),
-                          "free_slots": (slots.get(h) or {}).get("free"), "fits": fit,
-                          "gpus": [[g["model"], g["mem_gb"], g["mrsv_gb"], g["njobs"], g["mused_gb"]]
-                                   for g in gpus]})
+            entry = {"host": h, "status": sl.get("status"),
+                     "free_slots": sl.get("free"), "fits": fit,
+                     "gpus": [[g["model"], g["mem_gb"], g["mrsv_gb"], g["njobs"], g["mused_gb"]]
+                              for g in gpus]}
+            if sl.get("free_mem_mb") is not None:
+                entry["free_mem_gb"] = round(sl["free_mem_mb"] / 1024, 1)
+            hosts.append(entry)
         s["gpu_hosts"] = hosts
         s["hosts_total"] = len(hosts)
         s["hosts_fit"] = sum(1 for h in hosts if h["fits"])
@@ -776,7 +854,8 @@ EXPORT_COLS = ["job_id", "submit_ts", "submit_utc", "queue", "cores", "mem_mb", 
                "snap_queue_pend", "snap_queue_run", "snap_own_run_q", "snap_own_pend_q", "snap_hosts_fit",
                "snap_hosts_total", "snap_fairshare_priority", "snap_errors", "started", "pend_s",
                "pend_censored", "last_stat", "pend_reason", "last_checked_ts", "dependency", "snap_gpus_capable",
-               "snap_gpus_idle", "snap_gpus_free_mem", "outcome_source"]
+               "snap_gpus_idle", "snap_gpus_free_mem", "outcome_source", "aff_no", "snap_fairshare_group",
+               "snap_fairshare_group_priority"]
 
 
 def cmd_export(a):
@@ -797,11 +876,17 @@ def cmd_export(a):
         last = next((o for o in reversed(obs) if o.get("pend_s") is not None or o.get("stat")), obs[-1] if obs else {})
         reason = next((o.get("pend_reason") for o in reversed(obs) if o.get("pend_reason")), "")
         dep = req.get("dependency")
-        if dep is None:  # logged before the field existed
+        aff_no = req.get("aff_no")
+        if dep is None or aff_no is None:  # logged before the field existed
             try:
-                dep = parse_request([x for x in s.get("request_args") or [] if x != "<stdin>"])["dependency"]
+                parsed = parse_request([x for x in s.get("request_args") or [] if x != "<stdin>"])
+                if dep is None:
+                    dep = parsed["dependency"]
+                if aff_no is None:
+                    aff_no = parsed["aff_no"]
             except Exception:
-                dep = False
+                dep = bool(dep)
+                aff_no = bool(aff_no)
         pend = st.get("pend_s") if st else last.get("pend_s")
         w.writerow({
             "job_id": jid, "submit_ts": s.get("ts"),
@@ -821,7 +906,9 @@ def cmd_export(a):
             "last_stat": last.get("stat", ""), "pend_reason": reason, "last_checked_ts": last.get("ts", ""),
             "dependency": int(bool(dep)), "snap_gpus_capable": snap.get("gpus_capable"),
             "snap_gpus_idle": snap.get("gpus_idle"), "snap_gpus_free_mem": snap.get("gpus_free_mem"),
-            "outcome_source": (st or last).get("source", "")})
+            "outcome_source": (st or last).get("source", ""), "aff_no": int(bool(aff_no)),
+            "snap_fairshare_group": snap.get("fairshare_group", ""),
+            "snap_fairshare_group_priority": snap.get("fairshare_group_priority", "")})
     return 0
 
 
